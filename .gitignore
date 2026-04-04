@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+venv/
+ENV/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Local data / persistence
+plant_data/
+credentials.json
+
+# IDEs
+.vscode/
+.idea/
+.gemini/
