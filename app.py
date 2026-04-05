@@ -1685,6 +1685,204 @@ def page_live():
     else:
         st.info("Upload demand data for at least one plant to see the comparison chart.")
 
+    # ── Welspun Power Market: RE Schedule / Generation / Actual Demand / Net Buy-Sell ──
+    st.markdown("---")
+    st.markdown("#### 📈 Welspun Power Market — RE Schedule vs Actual Demand & Market Trading")
+    st.markdown(
+        "<div style='font-size:0.82rem;color:#64748b;margin-bottom:0.8rem'>"
+        "Manikaran facilitates buy/sell of net demand in open power exchange market on behalf of Welspun. "
+        "Green bars = surplus (sell to market) · Red bars = deficit (buy from market).</div>",
+        unsafe_allow_html=True,
+    )
+
+    import math as _math_mkt
+
+    # ── Generate 96-slot dummy data (same logic as the HTML reference) ──────
+    slots = 96
+    re_schedule   = []
+    re_generation  = []
+    actual_demand  = []
+
+    _rng_seed = 42  # fixed seed so chart is stable on re-renders
+    import random as _rnd
+    _rnd.seed(_rng_seed)
+
+    for i in range(slots):
+        h = (i * 15) / 60.0
+
+        # RE Schedule: thermal base + solar bell
+        solar  = 30 * _math_mkt.exp(-((h - 12) / 4) ** 2) if 6 <= h <= 18 else 0
+        thermal = (62
+                   + 8  * _math_mkt.sin(_math_mkt.pi * (h - 2) / 12)
+                   + 5  * _math_mkt.sin(_math_mkt.pi * (h - 8) / 6))
+        sched  = thermal + solar
+        re_schedule.append(round(sched, 2))
+
+        # RE Generation: consistently below schedule with small ripple
+        shortfall = (0.10
+                     + 0.05 * _math_mkt.sin(2 * _math_mkt.pi * h / 7   + 0.5)
+                     + 0.02 * _math_mkt.sin(2 * _math_mkt.pi * h / 1.8 + 1.1))
+        re_gen = sched * (1 - shortfall) + (_rnd.random() - 0.5) * 1.5
+        re_generation.append(round(max(0, re_gen), 2))
+
+        # Actual Demand: oscillates widely around schedule, many crossings
+        demand = (sched
+                  + 20 * _math_mkt.sin(2 * _math_mkt.pi * h / 5.2 + 0.9)
+                  + 12 * _math_mkt.sin(2 * _math_mkt.pi * h / 2.6 + 1.5)
+                  + 7  * _math_mkt.sin(2 * _math_mkt.pi * h / 1.4 + 0.4)
+                  + (_rnd.random() - 0.5) * 5)
+        demand = max(50, min(180, demand))
+        actual_demand.append(round(demand, 2))
+
+    net_demand  = [round(actual_demand[i] - re_generation[i], 2) for i in range(slots)]
+    buy_vals    = [v if v > 0 else 0 for v in net_demand]   # positive → buy
+    sell_vals   = [-v if v < 0 else 0 for v in net_demand]  # negative → sell (shown positive)
+
+    # Time labels
+    time_labels = []
+    for i in range(slots):
+        h = i * 15 // 60
+        m = (i * 15) % 60
+        time_labels.append(f"{h}:{m:02d}")
+
+    crossings = sum(1 for i in range(1, slots) if (net_demand[i-1] > 0) != (net_demand[i] > 0))
+
+    # ── KPI strip ───────────────────────────────────────────────────────────
+    avg_demand  = round(sum(actual_demand)  / slots, 1)
+    avg_sched   = round(sum(re_schedule)    / slots, 1)
+    avg_gen     = round(sum(re_generation)  / slots, 1)
+    total_buy   = round(sum(buy_vals)  * 0.25, 1)   # MW × 0.25hr = MWh
+    total_sell  = round(sum(sell_vals) * 0.25, 1)
+
+    mk1, mk2, mk3, mk4, mk5 = st.columns(5)
+    for col, label, val, color in [
+        (mk1, "Avg Actual Demand",  f"{avg_demand} MW",  "#8b3dba"),
+        (mk2, "Avg RE Schedule",    f"{avg_sched} MW",   "#2a5fa5"),
+        (mk3, "Avg RE Generation",  f"{avg_gen} MW",     "#1a8a50"),
+        (mk4, "Total Market Buy",   f"{total_buy} MWh",  "#b94a2a"),
+        (mk5, "Total Market Sell",  f"{total_sell} MWh", "#1a6b44"),
+    ]:
+        with col:
+            st.markdown(f"""
+            <div style='background:white;border:1px solid #e2e8f0;border-radius:8px;
+                        padding:0.75rem 1rem;font-family:DM Sans,sans-serif'>
+                <div style='font-size:0.68rem;color:#94a3b8;text-transform:uppercase;
+                            letter-spacing:0.05em;margin-bottom:3px'>{label}</div>
+                <div style='font-size:1.25rem;font-weight:700;color:{color}'>{val}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown(f"<div style='font-size:0.78rem;color:#64748b;margin:0.5rem 0'>⚡ {crossings} crossover events today</div>", unsafe_allow_html=True)
+
+    # ── Top chart: RE Schedule / RE Generation / Actual Demand ─────────────
+    fig_mkt = go.Figure()
+
+    # Shaded gap between RE Schedule and RE Generation (underperformance zone)
+    fig_mkt.add_trace(go.Scatter(
+        x=time_labels, y=re_schedule,
+        mode="lines", line=dict(width=0),
+        fill=None, showlegend=False, hoverinfo="skip",
+    ))
+    fig_mkt.add_trace(go.Scatter(
+        x=time_labels, y=re_generation,
+        mode="lines", line=dict(width=0),
+        fill="tonexty",
+        fillcolor="rgba(42,95,165,0.07)",
+        showlegend=False, hoverinfo="skip",
+    ))
+
+    # RE Schedule line
+    fig_mkt.add_trace(go.Scatter(
+        x=time_labels, y=re_schedule,
+        mode="lines", name="RE Schedule",
+        line=dict(color="#2a5fa5", width=2.5),
+        hovertemplate="<b>RE Schedule</b><br>%{x}<br>%{y:.1f} MW<extra></extra>",
+    ))
+
+    # RE Generation line
+    fig_mkt.add_trace(go.Scatter(
+        x=time_labels, y=re_generation,
+        mode="lines", name="RE Generation (actual)",
+        line=dict(color="#1a8a50", width=2, dash="dash"),
+        hovertemplate="<b>RE Generation</b><br>%{x}<br>%{y:.1f} MW<extra></extra>",
+    ))
+
+    # Actual Demand line
+    fig_mkt.add_trace(go.Scatter(
+        x=time_labels, y=actual_demand,
+        mode="lines", name="Actual Demand",
+        line=dict(color="#8b3dba", width=2.5, dash="dot"),
+        hovertemplate="<b>Actual Demand</b><br>%{x}<br>%{y:.1f} MW<extra></extra>",
+    ))
+
+    fig_mkt.update_layout(
+        height=380,
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        margin=dict(l=50, r=20, t=20, b=40),
+        legend=dict(
+            font=dict(family="DM Sans", size=11),
+            orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1,
+        ),
+        xaxis=dict(
+            gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=10),
+            tickangle=-45,
+            tickmode="array",
+            tickvals=time_labels[::8],
+            ticktext=time_labels[::8],
+        ),
+        yaxis=dict(
+            title="Power (MW)", gridcolor="#f1f5f9",
+            tickfont=dict(family="DM Sans", size=10),
+            ticksuffix=" MW",
+            range=[30, None],
+        ),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_mkt, use_container_width=True)
+
+    # ── Bottom chart: Net demand bar chart (buy = red down, sell = green up) ─
+    fig_net = go.Figure()
+
+    fig_net.add_trace(go.Bar(
+        x=time_labels, y=sell_vals,
+        name="Sell to market",
+        marker_color="rgba(20,120,70,0.75)",
+        hovertemplate="<b>Sell to market</b><br>%{x}<br>%{y:.1f} MW<extra></extra>",
+    ))
+    fig_net.add_trace(go.Bar(
+        x=time_labels, y=[-v for v in buy_vals],
+        name="Buy from market",
+        marker_color="rgba(180,60,30,0.75)",
+        hovertemplate="<b>Buy from market</b><br>%{x}<br>%{customdata:.1f} MW<extra></extra>",
+        customdata=buy_vals,
+    ))
+
+    fig_net.update_layout(
+        height=180,
+        barmode="relative",
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        margin=dict(l=50, r=20, t=10, b=40),
+        legend=dict(
+            font=dict(family="DM Sans", size=11),
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+        ),
+        xaxis=dict(
+            gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=10),
+            tickangle=-45,
+            tickmode="array",
+            tickvals=time_labels[::8],
+            ticktext=time_labels[::8],
+        ),
+        yaxis=dict(
+            title="Net demand",
+            gridcolor="#f1f5f9",
+            tickfont=dict(family="DM Sans", size=10),
+            ticksuffix=" MW",
+        ),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_net, use_container_width=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
