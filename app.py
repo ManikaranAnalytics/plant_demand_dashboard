@@ -1,5 +1,6 @@
 """
-app.py  —  Plant Demand Dashboard
+app.py  —  Welspun
+
 Run:  streamlit run app.py
 """
 from __future__ import annotations
