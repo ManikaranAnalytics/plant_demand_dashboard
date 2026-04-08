@@ -159,7 +159,12 @@ def load_data(plant_id: str) -> Optional[pd.DataFrame]:
     """Load all data for a plant. Supabase first, CSV fallback."""
     if SUPABASE_OK:
         try:
-            rows = _supa.table("plant_readings")                         .select("date, time_block, value, auxiliary, unit")                         .eq("plant_id", plant_id)                         .order("date")                         .order("time_block")                         .execute()
+            rows = _supa.table("plant_readings") \
+                        .select("date, time_block, value, auxiliary, unit") \
+                        .eq("plant_id", plant_id) \
+                        .order("date") \
+                        .order("time_block") \
+                        .execute()
             if not rows.data:
                 return None
             df = pd.DataFrame(rows.data)
@@ -1359,55 +1364,6 @@ def page_consolidated():
 # PAGE: LIVE GENERATION vs DEMAND
 # ─────────────────────────────────────────────────────────────────────────────
 
-import urllib.request
-import urllib.error
-
-LIVE_API_URL = "http://localhost:8765/live"
-
-def _fetch_live() -> Optional[dict]:
-    try:
-        with urllib.request.urlopen(LIVE_API_URL, timeout=2) as r:
-            return json.loads(r.read())
-    except Exception:
-        return None
-
-def _get_demand_for_block(block_index: int) -> Optional[float]:
-    """Sum WCL + WLL + Auxiliary for a given 1-96 block using latest available data."""
-    all_data = {p[0]: load_data(p[0]) for p in PLANTS}
-    plants_with_data = {k: v for k, v in all_data.items() if v is not None and not v.empty}
-    if not plants_with_data:
-        return None
-
-    total = 0.0
-    found_any = False
-
-    load_plants = ["WCL_PIPE","WCL_STEEL","WCL_ATSPL","WCL_WDIPL","WCL_WASCO",
-                   "WLL_WLL","WLL_WHSL"]
-    aux_plants  = ["GEN_80MW","GEN_43MW","GEN_Solar"]
-
-    for pid in load_plants:
-        df = plants_with_data.get(pid)
-        if df is None: continue
-        sub = df[df["Date"] == df["Date"].max()]
-        row = sub[sub["Time Block"] == block_index]
-        if not row.empty:
-            total += float(row["Value"].iloc[0])
-            found_any = True
-
-    for pid in aux_plants:
-        df = plants_with_data.get(pid)
-        if df is None: continue
-        sub = df[df["Date"] == df["Date"].max()]
-        row = sub[sub["Time Block"] == block_index]
-        if not row.empty and "Auxiliary" in row.columns:
-            v = row["Auxiliary"].iloc[0]
-            if pd.notna(v):
-                total += float(v)
-                found_any = True
-
-    return round(total, 2) if found_any else None
-
-
 def page_live():
     st.markdown("""
     <div style='margin-bottom:1rem'>
@@ -1415,307 +1371,31 @@ def page_live():
             ⚡ Live Generation vs Demand
         </h2>
         <p style='color:#64748b;font-family:DM Sans,sans-serif;margin-top:0.3rem'>
-            Real-time generation from the API compared against static scheduled demand.
-            Make sure <code>mock_api.py</code> is running on port 8765.
+            Welspun Power Market — RE Schedule vs Actual Demand &amp; Market Trading
         </p>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── API connection check ─────────────────────────────────────────────
-    col_status, col_refresh, col_auto = st.columns([3, 1, 2])
-
-    with col_refresh:
-        if st.button("🔄 Refresh Now", use_container_width=True):
-            st.rerun()
-
-    with col_auto:
-        auto_refresh = st.toggle("Auto-refresh (15s)", value=False)
-
-    # Auto-refresh using sleep + rerun — preserves session state / navigation
-    if auto_refresh:
-        import time as _time
-        _time.sleep(15)
-        st.rerun()
-
-    # ── Fetch live data ──────────────────────────────────────────────────
-    live = _fetch_live()
-
-    with col_status:
-        if live:
-            st.markdown("""
-            <div style='background:#f0fdf4;border:1px solid #86efac;border-radius:8px;
-                        padding:0.5rem 1rem;font-family:DM Sans,sans-serif;font-size:0.85rem;color:#166534;
-                        display:inline-block'>
-                🟢 <strong>API Connected</strong> — Live data streaming
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown("""
-            <div style='background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;
-                        padding:0.5rem 1rem;font-family:DM Sans,sans-serif;font-size:0.85rem;color:#991b1b;
-                        display:inline-block'>
-                🔴 <strong>API Offline</strong> — Run <code>python mock_api.py</code> to start
-            </div>
-            """, unsafe_allow_html=True)
-            st.info("Start the demo API with: `python mock_api.py`\n\nShowing demo snapshot data below.")
-            # Use a static snapshot so the page is still useful
-            live = {
-                "timestamp": datetime.now().isoformat(),
-                "time_block": "demo",
-                "block_index": (datetime.now().hour * 4 + datetime.now().minute // 15) + 1,
-                "plants": {
-                    "80MW":  {"generation": 58.4,  "auxiliary": 2.28},
-                    "43MW":  {"generation": 37.2,  "auxiliary": 1.52},
-                    "Solar": {"generation": 12.6,  "auxiliary": 0.38},
-                },
-                "totals": {
-                    "total_generation": 108.2,
-                    "total_auxiliary":  4.18,
-                }
-            }
-
-    block_idx  = live["block_index"]
-    time_block = live["time_block"]
-    ts         = live["timestamp"][:19].replace("T", "  ")
-    plants_live = live["plants"]
-    totals_live = live["totals"]
-
-    live_gen   = totals_live["total_generation"]
-    live_aux   = totals_live["total_auxiliary"]
-
-    # ── Get demand for this block ────────────────────────────────────────
-    demand = _get_demand_for_block(block_idx)
-    diff   = round(live_gen - demand, 2) if demand is not None else None
-
-    # ── Top KPI strip ────────────────────────────────────────────────────
-    st.markdown(f"<div style='font-size:0.8rem;color:#94a3b8;font-family:DM Sans;margin:0.8rem 0 0.3rem'>Last polled: {ts} &nbsp;|&nbsp; Block {block_idx}/96 &nbsp;|&nbsp; {time_block}</div>", unsafe_allow_html=True)
-
-    k1, k2, k3, k4 = st.columns(4)
-
-    def kpi_card(col, label, value, unit, color, sub=""):
-        with col:
-            st.markdown(f"""
-            <div style='background:white;border:2px solid {color};border-radius:10px;
-                        padding:1rem 1.2rem;font-family:DM Sans,sans-serif;
-                        box-shadow:0 2px 8px rgba(0,0,0,0.05)'>
-                <div style='font-size:0.7rem;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em'>{label}</div>
-                <div style='font-size:1.7rem;font-weight:800;color:{color};line-height:1.2'>{value}</div>
-                <div style='font-size:0.72rem;color:#94a3b8'>{unit}{(" · " + sub) if sub else ""}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    kpi_card(k1, "Live Generation", f"{live_gen:.2f}", "MW",  "#F97316", "80MW+43MW+Solar")
-    kpi_card(k2, "Live Auxiliary",  f"{live_aux:.2f}", "MW",  "#8B5CF6", "from gen plants")
-
-    if demand is not None:
-        kpi_card(k3, "Scheduled Demand", f"{demand:.2f}", "MW", "#3B82F6", f"block {block_idx}")
-        # Surplus/deficit
-        if diff > 0:
-            kpi_card(k4, "Surplus ▲", f"+{diff:.2f}", "MW", "#16A34A", "Gen > Demand")
-        elif diff < 0:
-            kpi_card(k4, "Deficit ▼", f"{diff:.2f}",  "MW", "#DC2626", "Gen < Demand")
-        else:
-            kpi_card(k4, "Balanced ✓", f"{diff:.2f}", "MW", "#64748B", "Gen = Demand")
-    else:
-        kpi_card(k3, "Scheduled Demand", "—", "MW", "#3B82F6", "no data uploaded")
-        kpi_card(k4, "Surplus / Deficit", "—", "MW", "#64748B", "upload demand data")
-
-    # ── Per-plant live breakdown ─────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("#### Per-Plant Live Readings")
-
-    PLANT_COLORS = {"80MW": "#F97316", "43MW": "#EAB308", "Solar": "#22C55E"}
-    pcols = st.columns(3)
-    for i, (name, color) in enumerate(PLANT_COLORS.items()):
-        p = plants_live.get(name, {})
-        g = p.get("generation", 0)
-        a = p.get("auxiliary",  0)
-        with pcols[i]:
-            st.markdown(f"""
-            <div style='background:white;border:1px solid #e2e8f0;border-top:4px solid {color};
-                        border-radius:10px;padding:1rem;font-family:DM Sans,sans-serif'>
-                <div style='font-weight:700;font-size:1rem;color:#1e293b;margin-bottom:0.6rem'>{name} Plant</div>
-                <div style='display:flex;justify-content:space-between;margin-bottom:0.3rem'>
-                    <span style='color:#64748b;font-size:0.85rem'>Generation</span>
-                    <span style='font-weight:700;color:{color};font-size:1rem'>{g:.2f} MW</span>
-                </div>
-                <div style='display:flex;justify-content:space-between'>
-                    <span style='color:#64748b;font-size:0.85rem'>Auxiliary</span>
-                    <span style='font-weight:600;color:#8B5CF6;font-size:0.95rem'>{a:.2f} MW</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    # ── All-blocks comparison chart: static demand vs live snapshot ──────
-    st.markdown("---")
-    st.markdown("#### Scheduled Demand Profile vs Live Generation")
-
-    all_data = {p[0]: load_data(p[0]) for p in PLANTS}
-    plants_with_data = {k: v for k, v in all_data.items() if v is not None and not v.empty}
-
-    if plants_with_data:
-        # Build demand curve for all 96 blocks from latest data
-        demand_rows = []
-        load_plants = ["WCL_PIPE","WCL_STEEL","WCL_ATSPL","WCL_WDIPL","WCL_WASCO",
-                       "WLL_WLL","WLL_WHSL"]
-        aux_plants  = ["GEN_80MW","GEN_43MW","GEN_Solar"]
-
-        idx = pd.RangeIndex(1, 97)
-        demand_series = pd.Series(0.0, index=idx)
-        has_demand = False
-
-        for pid in load_plants:
-            df = plants_with_data.get(pid)
-            if df is None: continue
-            sub = df[df["Date"] == df["Date"].max()].set_index("Time Block")["Value"]
-            demand_series = demand_series.add(sub.reindex(idx, fill_value=0), fill_value=0)
-            has_demand = True
-
-        for pid in aux_plants:
-            df = plants_with_data.get(pid)
-            if df is None: continue
-            sub = df[df["Date"] == df["Date"].max()]
-            if "Auxiliary" in sub.columns:
-                a = sub.set_index("Time Block")["Auxiliary"].dropna()
-                demand_series = demand_series.add(a.reindex(idx, fill_value=0), fill_value=0)
-
-        if has_demand:
-            x_labels = idx.map(_tb_to_label)
-
-            # Build simulated generation only up to the current block; NaN for future blocks
-            import math as _math
-            from mock_api import _interpolate, GEN_80MW_SHAPE, GEN_43MW_SHAPE, GEN_SOLAR_SHAPE
-            sim_gen = []
-            for tb in range(1, 97):
-                if tb <= block_idx:
-                    h_f = ((tb - 1) * 15) / 60.0
-                    g80  = _interpolate(GEN_80MW_SHAPE, h_f)
-                    g43  = _interpolate(GEN_43MW_SHAPE, h_f)
-                    gsol = max(0, _interpolate(GEN_SOLAR_SHAPE, h_f))
-                    sim_gen.append(round(g80 + g43 + gsol, 2))
-                else:
-                    sim_gen.append(float("nan"))  # future blocks — no line drawn
-
-            sim_series = pd.Series(sim_gen, index=idx)
-
-            # Overlay actual live point
-            fig = go.Figure()
-
-            # Demand curve
-            fig.add_trace(go.Scatter(
-                x=x_labels, y=demand_series.values,
-                mode="lines", name="Scheduled Demand",
-                line=dict(color="#3B82F6", width=2.5),
-                hovertemplate="<b>Demand</b><br>%{x}<br>%{y:.2f} MW<extra></extra>",
-            ))
-
-            # Simulated generation profile
-            fig.add_trace(go.Scatter(
-                x=x_labels, y=sim_series.values,
-                mode="lines", name="Generation Profile",
-                line=dict(color="#F97316", width=2, dash="dot"),
-                hovertemplate="<b>Generation</b><br>%{x}<br>%{y:.2f} MW<extra></extra>",
-            ))
-
-            # Surplus / deficit fill — only for blocks where generation data exists
-            surplus = sim_series - demand_series
-            surplus_display = surplus.where(sim_series.notna())
-            fig.add_trace(go.Scatter(
-                x=x_labels, y=surplus_display.values,
-                mode="lines", name="Surplus (+) / Deficit (−)",
-                line=dict(color="#16A34A", width=1.5),
-                fill="tozeroy",
-                fillcolor="rgba(22,163,74,0.08)",
-                hovertemplate="<b>Net</b><br>%{x}<br>%{y:.2f} MW<extra></extra>",
-            ))
-
-            # Live point marker
-            live_x = _tb_to_label(block_idx)
-            fig.add_trace(go.Scatter(
-                x=[live_x], y=[live_gen],
-                mode="markers", name="Live Now",
-                marker=dict(color="#DC2626", size=12, symbol="star",
-                            line=dict(color="white", width=2)),
-                hovertemplate=f"<b>LIVE</b><br>{live_x}<br>{live_gen:.2f} MW<extra></extra>",
-            ))
-
-            fig.update_layout(
-                xaxis=dict(title="Time Interval", gridcolor="#f1f5f9",
-                           tickfont=dict(family="DM Sans", size=9), tickangle=-45, nticks=12),
-                yaxis=dict(title="MW", gridcolor="#f1f5f9"),
-                plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
-                legend=dict(font=dict(family="DM Sans", size=11),
-                            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                margin=dict(l=50, r=20, t=50, b=70), height=420,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            # ── Block-by-block difference table (last 10 completed blocks) ──
-            st.markdown("#### Block Comparison Table")
-            current_b = block_idx
-            rows_table = []
-            for tb in range(max(1, current_b - 11), current_b + 1):
-                d_val = demand_series.get(tb, float("nan"))
-                g_val = sim_series.get(tb, float("nan"))
-                diff_val = round(g_val - d_val, 2) if pd.notna(d_val) and pd.notna(g_val) else float("nan")
-                status = ""
-                if pd.notna(diff_val):
-                    if diff_val > 1:   status = "🟢 Surplus"
-                    elif diff_val < -1: status = "🔴 Deficit"
-                    else:               status = "🟡 Balanced"
-                is_live = (tb == current_b)
-                rows_table.append({
-                    "Block": tb,
-                    "Time Interval": _tb_to_label(tb),
-                    "Demand (MW)":   round(d_val, 2) if pd.notna(d_val) else None,
-                    "Generation (MW)": round(g_val, 2) if pd.notna(g_val) else None,
-                    "Diff (MW)":     diff_val,
-                    "Status":        ("⚡ LIVE → " + status) if is_live else status,
-                })
-            st.dataframe(
-                pd.DataFrame(rows_table),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Diff (MW)": st.column_config.NumberColumn(format="%.2f"),
-                    "Demand (MW)": st.column_config.NumberColumn(format="%.2f"),
-                    "Generation (MW)": st.column_config.NumberColumn(format="%.2f"),
-                }
-            )
-    else:
-        st.info("Upload demand data for at least one plant to see the comparison chart.")
-
-    # ── Welspun Power Market: RE Schedule / Generation / Actual Demand / Net Buy-Sell ──
-    st.markdown("---")
-    st.markdown("#### 📈 Welspun Power Market — RE Schedule vs Actual Demand & Market Trading")
-    st.markdown(
-        "<div style='font-size:0.82rem;color:#64748b;margin-bottom:0.8rem'>"
-        "Manikaran facilitates buy/sell of net demand in open power exchange market on behalf of Welspun. "
-        "Green bars = surplus (sell to market) · Red bars = deficit (buy from market).</div>",
-        unsafe_allow_html=True,
-    )
-
     import math as _math_mkt
+    import random as _rnd
 
-    # ── Generate 96-slot dummy data (same logic as the HTML reference) ──────
+    # ── Generate 96-slot dummy data ──────────────────────────────────────────
     slots = 96
     re_schedule   = []
     re_generation  = []
     actual_demand  = []
 
-    _rng_seed = 42  # fixed seed so chart is stable on re-renders
-    import random as _rnd
-    _rnd.seed(_rng_seed)
+    _rnd.seed(42)  # fixed seed so chart is stable on re-renders
 
     for i in range(slots):
         h = (i * 15) / 60.0
 
         # RE Schedule: thermal base + solar bell
-        solar  = 30 * _math_mkt.exp(-((h - 12) / 4) ** 2) if 6 <= h <= 18 else 0
+        solar   = 30 * _math_mkt.exp(-((h - 12) / 4) ** 2) if 6 <= h <= 18 else 0
         thermal = (62
                    + 8  * _math_mkt.sin(_math_mkt.pi * (h - 2) / 12)
                    + 5  * _math_mkt.sin(_math_mkt.pi * (h - 8) / 6))
-        sched  = thermal + solar
+        sched   = thermal + solar
         re_schedule.append(round(sched, 2))
 
         # RE Generation: consistently below schedule with small ripple
@@ -1734,9 +1414,9 @@ def page_live():
         demand = max(50, min(180, demand))
         actual_demand.append(round(demand, 2))
 
-    net_demand  = [round(actual_demand[i] - re_generation[i], 2) for i in range(slots)]
-    buy_vals    = [v if v > 0 else 0 for v in net_demand]   # positive → buy
-    sell_vals   = [-v if v < 0 else 0 for v in net_demand]  # negative → sell (shown positive)
+    net_demand = [round(actual_demand[i] - re_generation[i], 2) for i in range(slots)]
+    buy_vals   = [v if v > 0 else 0 for v in net_demand]   # positive → buy
+    sell_vals  = [-v if v < 0 else 0 for v in net_demand]  # negative → sell (shown positive)
 
     # Time labels
     time_labels = []
@@ -1753,6 +1433,14 @@ def page_live():
     avg_gen     = round(sum(re_generation)  / slots, 1)
     total_buy   = round(sum(buy_vals)  * 0.25, 1)   # MW × 0.25hr = MWh
     total_sell  = round(sum(sell_vals) * 0.25, 1)
+
+    st.markdown("#### 📈 Welspun Power Market — RE Schedule vs Actual Demand & Market Trading")
+    st.markdown(
+        "<div style='font-size:0.82rem;color:#64748b;margin-bottom:0.8rem'>"
+        "Manikaran facilitates buy/sell of net demand in open power exchange market on behalf of Welspun. "
+        "Green bars = surplus (sell to market) · Red bars = deficit (buy from market).</div>",
+        unsafe_allow_html=True,
+    )
 
     mk1, mk2, mk3, mk4, mk5 = st.columns(5)
     for col, label, val, color in [
@@ -1772,7 +1460,11 @@ def page_live():
             </div>
             """, unsafe_allow_html=True)
 
-    st.markdown(f"<div style='font-size:0.78rem;color:#64748b;margin:0.5rem 0'>⚡ {crossings} crossover events today</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='font-size:0.78rem;color:#64748b;margin:0.5rem 0'>"
+        f"⚡ {crossings} crossover events today</div>",
+        unsafe_allow_html=True,
+    )
 
     # ── Top chart: RE Schedule / RE Generation / Actual Demand ─────────────
     fig_mkt = go.Figure()
