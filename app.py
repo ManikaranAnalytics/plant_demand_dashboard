@@ -1584,7 +1584,7 @@ def page_live():
 
 def main():
     st.set_page_config(
-        page_title="Plant Demand Dashboard",
+        page_title="Welspun Demand Dashboard",
         page_icon="⚡",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -1608,7 +1608,7 @@ def main():
     with st.sidebar:
         st.markdown("""
         <div style='padding:0.5rem 0 1.5rem 0'>
-            <div style='font-size:1.5rem;font-weight:800;color:#1e293b'>⚡ Plant Demand</div>
+            <div style='font-size:1.5rem;font-weight:800;color:#1e293b'> Welspun </div>
             <div style='font-size:0.8rem;color:#94a3b8'>50Hertz · WLL / WCL Automation</div>
         </div>
         """, unsafe_allow_html=True)
