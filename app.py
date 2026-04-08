@@ -1600,10 +1600,10 @@ def main():
     """, unsafe_allow_html=True)
 
     with st.sidebar:
+        st.image("/mnt/user-data/uploads/logo.png", width=200)
         st.markdown("""
-        <div style='padding:0.5rem 0 1.5rem 0'>
-            <div style='font-size:1.5rem;font-weight:800;color:#1e293b'>⚡ Plant Demand</div>
-            <div style='font-size:0.8rem;color:#94a3b8'>50Hertz · WLL / WCL Automation</div>
+        <div style='padding:0.2rem 0 1.2rem 0'>
+            <div style='font-size:0.8rem;color:#94a3b8'>WLL / WCL Automation</div>
         </div>
         """, unsafe_allow_html=True)
 
