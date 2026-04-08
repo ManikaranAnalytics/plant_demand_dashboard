@@ -1593,7 +1593,7 @@ def main():
     <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700;800&display=swap');
     html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-    .main .block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1200px; }
+    .main .block-container { padding-top: 0.5rem; padding-bottom: 2rem; max-width: 1200px; }
     .stButton > button { font-family: 'DM Sans', sans-serif; font-weight: 600; border-radius: 8px; }
     .stButton > button[kind="primary"] { background: #1e40af; border: none; }
     </style>
