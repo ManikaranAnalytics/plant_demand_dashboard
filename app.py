@@ -1599,8 +1599,10 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
+    
+
     # Display logo at the top of the main dashboard
-    st.image("logo.png", width=180)
+    st.image("50hertz_Logo (2).png", width=180)
 
     with st.sidebar:
         st.markdown("""
