@@ -4,7 +4,6 @@ Run:  streamlit run app.py
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import io
 import json
@@ -48,9 +47,11 @@ except Exception:
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Local fallback dir (used only when running locally without Supabase secrets)
 DATA_DIR = Path("plant_data")
 DATA_DIR.mkdir(exist_ok=True)
 
+# 96 time-block timestamps
 TIME_STAMPS = []
 for i in range(96):
     h_start = i * 15 // 60
@@ -59,10 +60,14 @@ for i in range(96):
     m_end   = ((i * 15 + 15)) % 60
     TIME_STAMPS.append(f"{h_start}:{m_start:02d} - {h_end}:{m_end:02d}")
 
+# Plant definitions
+# (plant_id, display_name, primary_col, aux_col_or_None, group, unit)
 PLANTS = [
+    # Generation plants  — have auxiliary column
     ("GEN_80MW",   "80MW Generation",    "80MW GENERATION",      "80MW AUXILIARY",   "Generation", "MW"),
     ("GEN_43MW",   "43MW Generation",    "43MW GENERATION",      "43MW AUXILIARY",   "Generation", "MW"),
     ("GEN_Solar",  "Solar Generation",   "SOLAR NET GENERATION", "SOLAR AUXILIARY",  "Generation", "MW"),
+    # Load plants — no auxiliary column
     ("WLL_WLL",    "WLL",                "WLL",                  None,               "WLL",        "MW"),
     ("WLL_WHSL",   "WHSL",               "WHSL",                 None,               "WLL",        "MW"),
     ("WCL_PIPE",   "WCL Pipe Division",  "WCL PIPE DIVISION",    None,               "WCL",        "MW"),
@@ -80,31 +85,20 @@ def _hash(pw: str) -> str:
 DEFAULT_CREDENTIALS = {p[0]: _hash(p[0].lower()) for p in PLANTS}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LOGO HELPER  —  reads logo file and returns base64 img tag
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _logo_html(height: int = 36) -> str:
-    """Return an <img> tag with the logo embedded as base64. Falls back gracefully."""
-    logo_path = Path("50hertz_Logo (2).png")
-    if logo_path.exists():
-        data = base64.b64encode(logo_path.read_bytes()).decode()
-        return f'<img src="data:image/png;base64,{data}" style="height:{height}px;width:auto;display:block;" />'
-    # Fallback: text badge if file not found
-    return "<span style='font-size:0.85rem;font-weight:700;color:#1e293b;letter-spacing:0.05em'>50HERTZ</span>"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CREDENTIALS
+# CREDENTIALS  —  Supabase table "credentials" or local JSON fallback
 # ─────────────────────────────────────────────────────────────────────────────
 
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 
 def load_credentials() -> dict:
+    """Load credentials: Supabase first, local JSON fallback."""
     if SUPABASE_OK:
         try:
             rows = _supa.table("credentials").select("plant_id, password_hash").execute()
             return {r["plant_id"]: r["password_hash"] for r in rows.data}
         except Exception:
             pass
+    # Local fallback
     if not CREDENTIALS_FILE.exists():
         CREDENTIALS_FILE.write_text(json.dumps(DEFAULT_CREDENTIALS, indent=2))
     return json.loads(CREDENTIALS_FILE.read_text())
@@ -114,13 +108,14 @@ def verify_password(plant_id: str, password: str) -> bool:
     return creds.get(plant_id) == _hash(password)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DATA STORAGE
+# DATA STORAGE  —  Supabase table "plant_readings" or local CSV fallback
 # ─────────────────────────────────────────────────────────────────────────────
 
 def data_file(plant_id: str) -> Path:
     return DATA_DIR / f"{plant_id}.csv"
 
 def save_data(plant_id: str, df: pd.DataFrame) -> None:
+    """Save plant data rows. Supabase upsert on (plant_id, date, time_block); CSV fallback."""
     df = df.copy()
     df["plant_id"] = plant_id
 
@@ -137,6 +132,7 @@ def save_data(plant_id: str, df: pd.DataFrame) -> None:
                     "unit":       str(row.get("Unit", "MW")),
                 }
                 records.append(rec)
+            # Upsert in chunks of 500
             for i in range(0, len(records), 500):
                 _supa.table("plant_readings").upsert(
                     records[i:i+500],
@@ -146,6 +142,7 @@ def save_data(plant_id: str, df: pd.DataFrame) -> None:
         except Exception as e:
             st.warning(f"Supabase save failed, falling back to local: {e}")
 
+    # ── Local CSV fallback ────────────────────────────────────────────────
     path = data_file(plant_id)
     if path.exists():
         existing = pd.read_csv(path, parse_dates=["Date"])
@@ -159,6 +156,7 @@ def save_data(plant_id: str, df: pd.DataFrame) -> None:
 
 
 def load_data(plant_id: str) -> Optional[pd.DataFrame]:
+    """Load all data for a plant. Supabase first, CSV fallback."""
     if SUPABASE_OK:
         try:
             rows = _supa.table("plant_readings") \
@@ -182,6 +180,7 @@ def load_data(plant_id: str) -> Optional[pd.DataFrame]:
         except Exception as e:
             st.warning(f"Supabase load failed, falling back to local: {e}")
 
+    # ── Local CSV fallback ────────────────────────────────────────────────
     path = data_file(plant_id)
     if not path.exists():
         return None
@@ -198,7 +197,7 @@ def load_last_entry(plant_id: str) -> Optional[pd.DataFrame]:
     return df[df["Date"] == last_date].copy()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EXCEL PARSER
+# EXCEL PARSER  — now handles timestamp column + optional auxiliary
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_upload(uploaded_file, plant_id: str) -> tuple[Optional[pd.DataFrame], str]:
@@ -208,7 +207,10 @@ def parse_upload(uploaded_file, plant_id: str) -> tuple[Optional[pd.DataFrame], 
         if uploaded_file.name.endswith(".csv"):
             df = pd.read_csv(uploaded_file)
         else:
+            # Row 0 = title banner ("... Daily Data Template | D+2: ..."), row 1 = real headers
+            # Try header=1 first; fall back to header=0 if the expected columns aren't found
             df = pd.read_excel(uploaded_file, header=1)
+            # If the real header columns aren't present, the file has no title row — re-read
             cols_upper = [str(c).strip().upper() for c in df.columns]
             if "DATE" not in cols_upper:
                 uploaded_file.seek(0)
@@ -216,10 +218,12 @@ def parse_upload(uploaded_file, plant_id: str) -> tuple[Optional[pd.DataFrame], 
 
         df.columns = [str(c).strip() for c in df.columns]
 
+        # ── Date column ──────────────────────────────────────────────────────
         date_col = next((c for c in df.columns if "date" in c.lower()), None)
         if date_col is None:
             return None, "Could not find 'Date' column."
 
+        # ── Time Interval / Time Block column ────────────────────────────────
         tb_col = next(
             (c for c in df.columns if "time" in c.lower() or "interval" in c.lower() or "block" in c.lower()),
             None
@@ -227,6 +231,7 @@ def parse_upload(uploaded_file, plant_id: str) -> tuple[Optional[pd.DataFrame], 
         if tb_col is None:
             return None, "Could not find 'Time Interval' or 'Time Block' column."
 
+        # ── Primary value column ─────────────────────────────────────────────
         value_col = None
         for c in df.columns:
             if c.upper() == col_header.upper():
@@ -240,6 +245,7 @@ def parse_upload(uploaded_file, plant_id: str) -> tuple[Optional[pd.DataFrame], 
         if value_col is None:
             return None, f"Could not find column '{col_header}'. Columns: {list(df.columns)}"
 
+        # ── Auxiliary column (optional) ──────────────────────────────────────
         aux_val_col = None
         if aux_col:
             for c in df.columns:
@@ -252,11 +258,15 @@ def parse_upload(uploaded_file, plant_id: str) -> tuple[Optional[pd.DataFrame], 
                         aux_val_col = c
                         break
 
+        # ── Build result dataframe ───────────────────────────────────────────
+        # Time block: if numeric keep as-is, if string like "0:00 - 0:15" map to index
         raw_tb = df[tb_col]
         if pd.api.types.is_numeric_dtype(raw_tb):
             time_block_series = pd.to_numeric(raw_tb, errors="coerce")
         else:
+            # Map timestamp string to block index 1-96
             ts_map = {ts: i+1 for i, ts in enumerate(TIME_STAMPS)}
+            # Also accept slight variations (strip spaces)
             ts_map_clean = {ts.replace(" ", ""): i+1 for i, ts in enumerate(TIME_STAMPS)}
             def map_ts(v):
                 v = str(v).strip()
@@ -298,9 +308,11 @@ def parse_upload(uploaded_file, plant_id: str) -> tuple[Optional[pd.DataFrame], 
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _d2_date() -> date:
+    """Return today + 2 days (D+2)."""
     return date.today() + timedelta(days=2)
 
 def generate_template(plant_id: str) -> bytes:
+    """Generate a filled Excel template for the given plant with D+2 date and 96 time-block rows."""
     if not OPENPYXL_OK:
         return b""
 
@@ -312,6 +324,7 @@ def generate_template(plant_id: str) -> bytes:
     ws = wb.active
     ws.title = display[:31]
 
+    # ── Styling helpers ──────────────────────────────────────────────────────
     HEADER_FILL   = PatternFill("solid", fgColor="1E3A5F")
     SUBHDR_FILL   = PatternFill("solid", fgColor="2D6A9F")
     ALT_FILL      = PatternFill("solid", fgColor="EBF5FB")
@@ -319,9 +332,11 @@ def generate_template(plant_id: str) -> bytes:
     TITLE_FONT    = Font(name="Calibri", bold=True, color="FFFFFF", size=13)
     DATA_FONT     = Font(name="Calibri", size=10)
     CENTER        = Alignment(horizontal="center", vertical="center")
+    LEFT          = Alignment(horizontal="left",   vertical="center")
     thin          = Side(style="thin", color="BDC3C7")
     BORDER        = Border(left=thin, right=thin, top=thin, bottom=thin)
 
+    # ── Title row ────────────────────────────────────────────────────────────
     cols = ["Date", "Time Interval", col_header]
     if aux_col:
         cols.append(aux_col)
@@ -336,6 +351,7 @@ def generate_template(plant_id: str) -> bytes:
     title_cell.alignment = CENTER
     ws.row_dimensions[1].height = 26
 
+    # ── Header row ───────────────────────────────────────────────────────────
     for ci, hdr in enumerate(cols, start=1):
         cell = ws.cell(row=2, column=ci, value=hdr)
         cell.font      = HEADER_FONT
@@ -344,35 +360,43 @@ def generate_template(plant_id: str) -> bytes:
         cell.border    = BORDER
     ws.row_dimensions[2].height = 20
 
+    # ── Data rows ────────────────────────────────────────────────────────────
     for i, ts in enumerate(TIME_STAMPS):
         row = 3 + i
         fill = ALT_FILL if i % 2 == 0 else None
 
+        # Date
         dc = ws.cell(row=row, column=1, value=d2_str)
         dc.font = DATA_FONT; dc.alignment = CENTER; dc.border = BORDER
         if fill: dc.fill = fill
 
+        # Time Interval
         tc = ws.cell(row=row, column=2, value=ts)
         tc.font = DATA_FONT; tc.alignment = CENTER; tc.border = BORDER
         if fill: tc.fill = fill
 
+        # Primary value (blank — user fills in)
         vc = ws.cell(row=row, column=3, value=None)
         vc.font = DATA_FONT; vc.alignment = CENTER; vc.border = BORDER
         if fill: vc.fill = fill
 
+        # Auxiliary (if applicable)
         if aux_col:
             ac = ws.cell(row=row, column=4, value=None)
             ac.font = DATA_FONT; ac.alignment = CENTER; ac.border = BORDER
             if fill: ac.fill = fill
 
+    # ── Column widths ────────────────────────────────────────────────────────
     ws.column_dimensions["A"].width = 14
     ws.column_dimensions["B"].width = 20
     ws.column_dimensions["C"].width = 22
     if aux_col:
         ws.column_dimensions["D"].width = 22
 
+    # ── Freeze panes ─────────────────────────────────────────────────────────
     ws.freeze_panes = "A3"
 
+    # ── Instructions sheet ───────────────────────────────────────────────────
     ws2 = wb.create_sheet("Instructions")
     instructions = [
         ("Plant",        display),
@@ -411,6 +435,7 @@ COLORS = {
     "WCL_ATSPL":  "#8B5CF6",
     "WCL_WDIPL":  "#F43F5E",
     "WCL_WASCO":  "#06B6D4",
+    # Totals
     "TOTAL_GEN":  "#F97316",
     "TOTAL_WLL":  "#3B82F6",
     "TOTAL_WCL":  "#EC4899",
@@ -419,6 +444,7 @@ COLORS = {
 }
 
 def _tb_to_label(tb):
+    """Convert 1-96 time block index to timestamp label."""
     try:
         idx = int(tb) - 1
         if 0 <= idx < 96:
@@ -438,16 +464,21 @@ def make_line_chart(df: pd.DataFrame, plant_id: str, title: str) -> go.Figure:
         label = pd.to_datetime(d).strftime("%d %b %Y")
         x_labels = sub["Time Block"].apply(_tb_to_label)
         fig.add_trace(go.Scatter(
-            x=x_labels, y=sub["Value"],
-            mode="lines", name=label,
+            x=x_labels,
+            y=sub["Value"],
+            mode="lines",
+            name=label,
             line=dict(width=2),
             hovertemplate=f"%{{x}}<br>%{{y:.2f}} {unit}<br>{label}<extra></extra>",
         ))
 
+        # Auxiliary trace (dashed) if present
         if "Auxiliary" in sub.columns and sub["Auxiliary"].notna().any():
             fig.add_trace(go.Scatter(
-                x=x_labels, y=sub["Auxiliary"],
-                mode="lines", name=f"{label} (Aux)",
+                x=x_labels,
+                y=sub["Auxiliary"],
+                mode="lines",
+                name=f"{label} (Aux)",
                 line=dict(width=1.5, dash="dot", color=color),
                 opacity=0.6,
                 hovertemplate=f"%{{x}}<br>Aux: %{{y:.2f}} {unit}<br>{label}<extra></extra>",
@@ -455,13 +486,27 @@ def make_line_chart(df: pd.DataFrame, plant_id: str, title: str) -> go.Figure:
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=16, family="DM Sans", color="#1e293b"), x=0.02),
-        xaxis=dict(title="Time Interval", gridcolor="#f1f5f9", linecolor="#e2e8f0",
-                   tickfont=dict(family="DM Sans", size=9), tickangle=-45, nticks=12),
-        yaxis=dict(title=f"Value ({unit})", gridcolor="#f1f5f9", linecolor="#e2e8f0",
-                   tickfont=dict(family="DM Sans", size=11), rangemode="tozero"),
-        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                    font=dict(family="DM Sans", size=11)),
+        xaxis=dict(
+            title="Time Interval",
+            gridcolor="#f1f5f9",
+            linecolor="#e2e8f0",
+            tickfont=dict(family="DM Sans", size=9),
+            tickangle=-45,
+            nticks=12,
+        ),
+        yaxis=dict(
+            title=f"Value ({unit})",
+            gridcolor="#f1f5f9",
+            linecolor="#e2e8f0",
+            tickfont=dict(family="DM Sans", size=11),
+            rangemode="tozero",
+        ),
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+            font=dict(family="DM Sans", size=11),
+        ),
         margin=dict(l=50, r=20, t=60, b=70),
         height=350,
     )
@@ -469,23 +514,25 @@ def make_line_chart(df: pd.DataFrame, plant_id: str, title: str) -> go.Figure:
 
 
 def make_total_chart(series_dict: dict, title: str, color_map: dict) -> go.Figure:
+    """Plot multiple named series (dict of name → series indexed by time-block) on one chart."""
     fig = go.Figure()
     for name, ser in series_dict.items():
         if ser is None or ser.empty:
             continue
         x_labels = ser.index.map(_tb_to_label)
         fig.add_trace(go.Scatter(
-            x=x_labels, y=ser.values,
-            mode="lines", name=name,
+            x=x_labels,
+            y=ser.values,
+            mode="lines",
+            name=name,
             line=dict(width=2.5, color=color_map.get(name, "#888")),
             hovertemplate=f"<b>{name}</b><br>%{{x}}<br>%{{y:.2f}} MW<extra></extra>",
         ))
     fig.update_layout(
         title=dict(text=title, font=dict(size=15, family="DM Sans", color="#1e293b"), x=0.02),
-        xaxis=dict(title="Time Interval", gridcolor="#f1f5f9",
-                   tickfont=dict(family="DM Sans", size=9), tickangle=-45, nticks=12),
-        yaxis=dict(title="MW", gridcolor="#f1f5f9",
-                   tickfont=dict(family="DM Sans", size=11), rangemode="tozero"),
+        xaxis=dict(title="Time Interval", gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=9),
+                   tickangle=-45, nticks=12),
+        yaxis=dict(title="MW", gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=11), rangemode="tozero"),
         plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
         legend=dict(font=dict(family="DM Sans", size=11)),
         margin=dict(l=50, r=20, t=60, b=70),
@@ -510,12 +557,9 @@ def make_dashboard_overview(all_data: dict) -> go.Figure:
             hovertemplate=f"<b>{display}</b><br>%{{x}}<br>%{{y:.2f}} {unit}<br>{pd.to_datetime(last_date).strftime('%d %b %Y')}<extra></extra>",
         ))
     fig.update_layout(
-        title=dict(text="All Plants — Latest Submission",
-                   font=dict(size=16, family="DM Sans", color="#1e293b"), x=0.02),
-        xaxis=dict(title="Time Interval", gridcolor="#f1f5f9",
-                   tickfont=dict(family="DM Sans", size=9), tickangle=-45, nticks=12),
-        yaxis=dict(title="MW", gridcolor="#f1f5f9",
-                   tickfont=dict(family="DM Sans", size=11), rangemode="tozero"),
+        title=dict(text="All Plants — Latest Submission", font=dict(size=16, family="DM Sans", color="#1e293b"), x=0.02),
+        xaxis=dict(title="Time Interval", gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=9), tickangle=-45, nticks=12),
+        yaxis=dict(title="MW", gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=11), rangemode="tozero"),
         plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
         legend=dict(orientation="v", font=dict(family="DM Sans", size=11),
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#e2e8f0", borderwidth=1),
@@ -529,12 +573,21 @@ def make_dashboard_overview(all_data: dict) -> go.Figure:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_totals(plants_with_data: dict, selected_date) -> dict:
+    """
+    Returns dict of {label: pd.Series indexed by Time Block 1-96}.
+    Total WCL  = PIPE + STEEL + ATSPL + WDIPL + WASCO
+    Total WLL  = WLL + WHSL
+    Total AUX  = 80MW AUX + 43MW AUX + Solar AUX (if any)
+    Total Load = Total WLL + Total WCL + Total AUX
+    Total Gen  = 80MW GEN + 43MW GEN + Solar GEN
+    """
     def get_series(plant_id, col="Value"):
         df = plants_with_data.get(plant_id)
         if df is None or df.empty:
             return None
         sub = df[df["Date"] == selected_date]
         if sub.empty:
+            # Fall back to most recent available date
             sub = df[df["Date"] == df["Date"].max()]
         if sub.empty:
             return None
@@ -557,21 +610,26 @@ def compute_totals(plants_with_data: dict, selected_date) -> dict:
                 any_data = True
         return result if any_data else None
 
+    # WCL group
     wcl = safe_add(
         get_series("WCL_PIPE"), get_series("WCL_STEEL"),
         get_series("WCL_ATSPL"), get_series("WCL_WDIPL"), get_series("WCL_WASCO"),
     )
+    # WLL group
     wll = safe_add(get_series("WLL_WLL"), get_series("WLL_WHSL"))
+    # Auxiliary from generation plants
     aux = safe_add(
         get_series("GEN_80MW", "Auxiliary"),
         get_series("GEN_43MW", "Auxiliary"),
         get_series("GEN_Solar", "Auxiliary"),
     )
+    # Total Load
     total_load = safe_add(
         wcl if wcl is not None else None,
         wll if wll is not None else None,
         aux if aux is not None else None,
     )
+    # Total Generation
     total_gen = safe_add(
         get_series("GEN_80MW"), get_series("GEN_43MW"), get_series("GEN_Solar"),
     )
@@ -639,6 +697,7 @@ def page_input():
             </div>
             """, unsafe_allow_html=True)
 
+        # ── Template for the selected plant only ──────────────────────────
         if OPENPYXL_OK:
             st.markdown("---")
             d2 = _d2_date()
@@ -664,6 +723,7 @@ def page_input():
             )
         return
 
+    # ── Logged in ─────────────────────────────────────────────────────────
     plant_id = st.session_state.logged_in_plant
     pid, display, col_header, aux_col, group, unit = PLANT_BY_ID[plant_id]
 
@@ -685,6 +745,7 @@ def page_input():
             st.session_state.logged_in_plant = None
             st.rerun()
 
+    # ── Template download ──────────────────────────────────────────────────
     st.markdown("#### 📥 Download Data Template")
     d2_str = _d2_date().strftime("%d-%m-%Y")
     aux_note = f" + {aux_col}" if aux_col else ""
@@ -710,6 +771,7 @@ def page_input():
     else:
         st.warning("openpyxl not installed — template download unavailable.")
 
+    # ── Last submission ───────────────────────────────────────────────────
     last = load_last_entry(plant_id)
     if last is not None:
         last_date = last["Date"].max().strftime("%d %B %Y")
@@ -746,6 +808,7 @@ def page_input():
     else:
         st.info("No previous data found. Download the template, fill in your values, and upload below.")
 
+    # ── Upload ───────────────────────────────────────────────────────────
     st.markdown("#### 📂 Upload Today's Data")
     aux_note2 = f", <strong>{aux_col}</strong>" if aux_col else ""
     st.markdown(f"""
@@ -799,6 +862,58 @@ def page_input():
         st.plotly_chart(fig, use_container_width=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PAGE: TEMPLATE DOWNLOAD (ALL PLANTS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def page_templates():
+    st.markdown("""
+    <div style='margin-bottom:1.5rem'>
+        <h2 style='font-family:DM Sans,sans-serif;color:#1e293b;font-size:1.6rem;margin:0'>
+            📋 Excel Templates
+        </h2>
+        <p style='color:#64748b;font-family:DM Sans,sans-serif;margin-top:0.3rem'>
+            Download pre-filled templates for each plant. Date is set to D+2 with 96 time-interval rows.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    d2 = _d2_date()
+    st.info(f"📅 Templates pre-filled for **D+2 date: {d2.strftime('%d %B %Y')}**")
+
+    groups = {}
+    for p in PLANTS:
+        g = p[4]
+        groups.setdefault(g, []).append(p)
+
+    for grp, plants_list in groups.items():
+        st.markdown(f"##### {grp} Plants")
+        cols = st.columns(min(len(plants_list), 3))
+        for ci, (pid, display, col_header, aux_col, grp2, unit) in enumerate(plants_list):
+            with cols[ci % 3]:
+                aux_badge = f"<br><span style='font-size:0.72rem;color:#7c3aed'>+ {aux_col}</span>" if aux_col else ""
+                st.markdown(f"""
+                <div style='background:white;border:1px solid #e2e8f0;border-radius:10px;
+                            padding:0.8rem;margin-bottom:0.5rem;font-family:DM Sans,sans-serif;
+                            border-top:3px solid {COLORS.get(pid,"#888")}'>
+                    <div style='font-weight:600;color:#1e293b;font-size:0.95rem'>{display}</div>
+                    <div style='font-size:0.78rem;color:#64748b'>{col_header}{aux_badge}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                if OPENPYXL_OK:
+                    tmpl_bytes = generate_template(pid)
+                    d2_str = d2.strftime("%d-%m-%Y")
+                    st.download_button(
+                        label="⬇️ Download",
+                        data=tmpl_bytes,
+                        file_name=f"template_{pid}_{d2_str}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"tmpl_{pid}",
+                        use_container_width=True,
+                    )
+                else:
+                    st.warning("openpyxl needed")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PAGE: DASHBOARD
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -821,6 +936,7 @@ def page_dashboard():
         st.warning("No data available yet. Plants need to submit their data first.")
         return
 
+    # ── Date selector ──────────────────────────────────────────────────────
     all_dates = sorted(set(
         d for df in plants_with_data.values() for d in df["Date"].unique()
     ), reverse=True)
@@ -828,6 +944,9 @@ def page_dashboard():
     selected_date_str = st.selectbox("📅 View Date", date_options_str, key="dash_date")
     selected_date = pd.to_datetime(selected_date_str, format="%d %B %Y")
 
+    # ─────────────────────────────────────────────────────────────────────
+    # SECTION 1 — INDIVIDUAL SUMMARY CARDS
+    # ─────────────────────────────────────────────────────────────────────
     st.markdown("#### Summary — Individual Plants")
     card_cols = st.columns(5)
     for i, (plant_id, df) in enumerate(plants_with_data.items()):
@@ -848,6 +967,9 @@ def page_dashboard():
             </div>
             """, unsafe_allow_html=True)
 
+    # ─────────────────────────────────────────────────────────────────────
+    # SECTION 2 — TOTALS CARDS
+    # ─────────────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### 📊 Totals Overview")
 
@@ -879,6 +1001,7 @@ def page_dashboard():
             </div>
             """, unsafe_allow_html=True)
 
+    # ── Totals Chart ───────────────────────────────────────────────────────
     total_color_map = {
         "Total WCL":        "#EC4899",
         "Total WLL":        "#3B82F6",
@@ -891,11 +1014,17 @@ def page_dashboard():
         fig_totals = make_total_chart(valid_totals, "Totals — All Groups", total_color_map)
         st.plotly_chart(fig_totals, use_container_width=True)
 
+    # ─────────────────────────────────────────────────────────────────────
+    # SECTION 3 — ALL PLANTS OVERVIEW CHART
+    # ─────────────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### All Plants Overview")
     fig_overview = make_dashboard_overview(plants_with_data)
     st.plotly_chart(fig_overview, use_container_width=True)
 
+    # ─────────────────────────────────────────────────────────────────────
+    # SECTION 4 — DETAILED PLANT CHARTS
+    # ─────────────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Detailed Plant Charts")
 
@@ -943,6 +1072,9 @@ def page_dashboard():
                         fig = make_line_chart(date_df, plant_id, display)
                         st.plotly_chart(fig, use_container_width=True)
 
+    # ─────────────────────────────────────────────────────────────────────
+    # SECTION 5 — STATISTICS TABLE
+    # ─────────────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Daily Statistics Table")
 
@@ -966,6 +1098,9 @@ def page_dashboard():
     if rows:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+    # ─────────────────────────────────────────────────────────────────────
+    # SECTION 6 — COMPARISON CHART
+    # ─────────────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Compare Plants Side-by-Side")
 
@@ -994,12 +1129,10 @@ def page_dashboard():
                 hovertemplate=f"{display}: %{{y:.2f}} {unit}<extra></extra>",
             ))
         fig_compare.update_layout(
-            title=dict(text="Plant Comparison",
-                       font=dict(size=15, family="DM Sans", color="#1e293b"), x=0.02),
+            title=dict(text="Plant Comparison", font=dict(size=15, family="DM Sans", color="#1e293b"), x=0.02),
             xaxis=dict(title="Time Interval", gridcolor="#f1f5f9",
                        tickfont=dict(family="DM Sans", size=9), tickangle=-45, nticks=12),
-            yaxis=dict(title="MW", gridcolor="#f1f5f9",
-                       tickfont=dict(family="DM Sans", size=11), rangemode="tozero"),
+            yaxis=dict(title="MW", gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=11), rangemode="tozero"),
             plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
             legend=dict(font=dict(family="DM Sans", size=11)),
             margin=dict(l=50, r=20, t=60, b=70), height=400,
@@ -1023,6 +1156,7 @@ def page_consolidated():
     </div>
     """, unsafe_allow_html=True)
 
+    # Load all plant data
     all_data = {p[0]: load_data(p[0]) for p in PLANTS}
     plants_with_data = {k: v for k, v in all_data.items() if v is not None and not v.empty}
 
@@ -1030,6 +1164,7 @@ def page_consolidated():
         st.warning("No data available yet.")
         return
 
+    # ── Date selector ──────────────────────────────────────────────────────
     all_dates = sorted(set(
         d for df in plants_with_data.values() for d in df["Date"].unique()
     ), reverse=True)
@@ -1037,12 +1172,15 @@ def page_consolidated():
     selected_date_str = st.selectbox("📅 View Date", date_options_str, key="cons_date")
     selected_date = pd.to_datetime(selected_date_str, format="%d %B %Y")
 
+    # ── Build consolidated rows indexed by Time Block 1-96 ─────────────────
     def get_plant_series(plant_id, col="Value") -> pd.Series:
+        """Return a Series indexed 1-96. Falls back to latest date if selected_date missing."""
         df = plants_with_data.get(plant_id)
         if df is None or df.empty:
             return pd.Series(dtype=float)
         sub = df[df["Date"] == selected_date]
         if sub.empty:
+            # fallback to most recent date
             sub = df[df["Date"] == df["Date"].max()]
         if sub.empty:
             return pd.Series(dtype=float)
@@ -1078,12 +1216,15 @@ def page_consolidated():
         wdipl= v("WCL_WDIPL")
         wasco= v("WCL_WASCO")
 
+        # WML = WLL + WHSL (total WLL group)
         wml_vals = [x for x in [wll, whsl] if pd.notna(x)]
         wml = sum(wml_vals) if wml_vals else float("nan")
 
+        # Total WCL = pipe + steel + atspl + wdipl + wasco
         wcl_vals = [x for x in [pipe, stl, atspl, wdipl, wasco] if pd.notna(x)]
         total_wcl = sum(wcl_vals) if wcl_vals else float("nan")
 
+        # Total Demand = Total WCL + Total WLL (WML) + Total Auxiliary
         demand_vals = [x for x in [total_wcl, wml, total_aux] if pd.notna(x)]
         total_demand = sum(demand_vals) if demand_vals else float("nan")
 
@@ -1110,6 +1251,7 @@ def page_consolidated():
 
     cons_df = pd.DataFrame(rows)
 
+    # ── Fallback notice ────────────────────────────────────────────────────
     fallback_notes = []
     for pid, df in plants_with_data.items():
         _, disp, _, _, _, _ = PLANT_BY_ID[pid]
@@ -1120,12 +1262,12 @@ def page_consolidated():
     if fallback_notes:
         st.markdown(f"""
         <div style='background:#fffbeb;border:1px solid #fde68a;border-radius:8px;
-                    padding:0.7rem 1rem;margin-bottom:1rem;font-family:DM Sans,sans-serif;
-                    font-size:0.82rem;color:#92400e'>
+                    padding:0.7rem 1rem;margin-bottom:1rem;font-family:DM Sans,sans-serif;font-size:0.82rem;color:#92400e'>
             ⚠️ <strong>Fallback data used for:</strong> {" &nbsp;|&nbsp; ".join(fallback_notes)}
         </div>
         """, unsafe_allow_html=True)
 
+    # ── Summary stat row ───────────────────────────────────────────────────
     numeric_cols = [c for c in cons_df.columns if c != "Time Interval"]
     summary = cons_df[numeric_cols].mean().round(2)
     scols = st.columns(3)
@@ -1149,6 +1291,7 @@ def page_consolidated():
             </div>
             """, unsafe_allow_html=True)
 
+    # ── Main table ─────────────────────────────────────────────────────────
     st.markdown(f"##### All 96 Time Blocks — {selected_date_str}")
     st.dataframe(
         cons_df,
@@ -1158,12 +1301,14 @@ def page_consolidated():
         column_config={c: st.column_config.NumberColumn(format="%.3f") for c in numeric_cols},
     )
 
+    # ── Download consolidated as Excel ─────────────────────────────────────
     if OPENPYXL_OK:
         def to_excel(df: pd.DataFrame) -> bytes:
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False, sheet_name="Consolidated")
                 ws = writer.sheets["Consolidated"]
+                # Header styling
                 hdr_fill = PatternFill("solid", fgColor="1E3A5F")
                 hdr_font = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
                 for cell in ws[1]:
@@ -1185,6 +1330,7 @@ def page_consolidated():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+    # ── Line chart of key totals ───────────────────────────────────────────
     st.markdown("---")
     st.markdown("##### Totals Chart")
     chart_cols = {
@@ -1234,15 +1380,18 @@ def page_live():
     import math as _math_mkt
     import random as _rnd
 
+    # ── Generate 96-slot dummy data ──────────────────────────────────────────
     slots = 96
     re_schedule   = []
     re_generation  = []
     actual_demand  = []
 
-    _rnd.seed(42)
+    _rnd.seed(42)  # fixed seed so chart is stable on re-renders
 
     for i in range(slots):
         h = (i * 15) / 60.0
+
+        # RE Schedule: thermal base + solar bell
         solar   = 30 * _math_mkt.exp(-((h - 12) / 4) ** 2) if 6 <= h <= 18 else 0
         thermal = (62
                    + 8  * _math_mkt.sin(_math_mkt.pi * (h - 2) / 12)
@@ -1250,12 +1399,14 @@ def page_live():
         sched   = thermal + solar
         re_schedule.append(round(sched, 2))
 
+        # RE Generation: consistently below schedule with small ripple
         shortfall = (0.10
                      + 0.05 * _math_mkt.sin(2 * _math_mkt.pi * h / 7   + 0.5)
                      + 0.02 * _math_mkt.sin(2 * _math_mkt.pi * h / 1.8 + 1.1))
         re_gen = sched * (1 - shortfall) + (_rnd.random() - 0.5) * 1.5
         re_generation.append(round(max(0, re_gen), 2))
 
+        # Actual Demand: oscillates widely around schedule, many crossings
         demand = (sched
                   + 20 * _math_mkt.sin(2 * _math_mkt.pi * h / 5.2 + 0.9)
                   + 12 * _math_mkt.sin(2 * _math_mkt.pi * h / 2.6 + 1.5)
@@ -1265,9 +1416,10 @@ def page_live():
         actual_demand.append(round(demand, 2))
 
     net_demand = [round(actual_demand[i] - re_generation[i], 2) for i in range(slots)]
-    buy_vals   = [v if v > 0 else 0 for v in net_demand]
-    sell_vals  = [-v if v < 0 else 0 for v in net_demand]
+    buy_vals   = [v if v > 0 else 0 for v in net_demand]   # positive → buy
+    sell_vals  = [-v if v < 0 else 0 for v in net_demand]  # negative → sell (shown positive)
 
+    # Time labels
     time_labels = []
     for i in range(slots):
         h = i * 15 // 60
@@ -1276,10 +1428,11 @@ def page_live():
 
     crossings = sum(1 for i in range(1, slots) if (net_demand[i-1] > 0) != (net_demand[i] > 0))
 
+    # ── KPI strip ───────────────────────────────────────────────────────────
     avg_demand  = round(sum(actual_demand)  / slots, 1)
     avg_sched   = round(sum(re_schedule)    / slots, 1)
     avg_gen     = round(sum(re_generation)  / slots, 1)
-    total_buy   = round(sum(buy_vals)  * 0.25, 1)
+    total_buy   = round(sum(buy_vals)  * 0.25, 1)   # MW × 0.25hr = MWh
     total_sell  = round(sum(sell_vals) * 0.25, 1)
 
     st.markdown("#### 📈 Welspun Power Market — RE Schedule vs Actual Demand & Market Trading")
@@ -1314,7 +1467,10 @@ def page_live():
         unsafe_allow_html=True,
     )
 
+    # ── Top chart: RE Schedule / RE Generation / Actual Demand ─────────────
     fig_mkt = go.Figure()
+
+    # Shaded gap between RE Schedule and RE Generation (underperformance zone)
     fig_mkt.add_trace(go.Scatter(
         x=time_labels, y=re_schedule,
         mode="lines", line=dict(width=0),
@@ -1323,44 +1479,63 @@ def page_live():
     fig_mkt.add_trace(go.Scatter(
         x=time_labels, y=re_generation,
         mode="lines", line=dict(width=0),
-        fill="tonexty", fillcolor="rgba(42,95,165,0.07)",
+        fill="tonexty",
+        fillcolor="rgba(42,95,165,0.07)",
         showlegend=False, hoverinfo="skip",
     ))
+
+    # RE Schedule line
     fig_mkt.add_trace(go.Scatter(
         x=time_labels, y=re_schedule,
         mode="lines", name="RE Schedule",
         line=dict(color="#2a5fa5", width=2.5),
         hovertemplate="<b>RE Schedule</b><br>%{x}<br>%{y:.1f} MW<extra></extra>",
     ))
+
+    # RE Generation line
     fig_mkt.add_trace(go.Scatter(
         x=time_labels, y=re_generation,
         mode="lines", name="RE Generation (actual)",
         line=dict(color="#1a8a50", width=2, dash="dash"),
         hovertemplate="<b>RE Generation</b><br>%{x}<br>%{y:.1f} MW<extra></extra>",
     ))
+
+    # Actual Demand line
     fig_mkt.add_trace(go.Scatter(
         x=time_labels, y=actual_demand,
         mode="lines", name="Actual Demand",
         line=dict(color="#8b3dba", width=2.5, dash="dot"),
         hovertemplate="<b>Actual Demand</b><br>%{x}<br>%{y:.1f} MW<extra></extra>",
     ))
+
     fig_mkt.update_layout(
         height=380,
         plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
         margin=dict(l=50, r=20, t=20, b=40),
-        legend=dict(font=dict(family="DM Sans", size=11),
-                    orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
-        xaxis=dict(gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=10),
-                   tickangle=-45, tickmode="array",
-                   tickvals=time_labels[::8], ticktext=time_labels[::8]),
-        yaxis=dict(title="Power (MW)", gridcolor="#f1f5f9",
-                   tickfont=dict(family="DM Sans", size=10),
-                   ticksuffix=" MW", range=[30, None]),
+        legend=dict(
+            font=dict(family="DM Sans", size=11),
+            orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1,
+        ),
+        xaxis=dict(
+            gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=10),
+            tickangle=-45,
+            tickmode="array",
+            tickvals=time_labels[::8],
+            ticktext=time_labels[::8],
+        ),
+        yaxis=dict(
+            title="Power (MW)", gridcolor="#f1f5f9",
+            tickfont=dict(family="DM Sans", size=10),
+            ticksuffix=" MW",
+            range=[30, None],
+        ),
         hovermode="x unified",
     )
     st.plotly_chart(fig_mkt, use_container_width=True)
 
+    # ── Bottom chart: Net demand bar chart (buy = red down, sell = green up) ─
     fig_net = go.Figure()
+
     fig_net.add_trace(go.Bar(
         x=time_labels, y=sell_vals,
         name="Sell to market",
@@ -1374,17 +1549,29 @@ def page_live():
         hovertemplate="<b>Buy from market</b><br>%{x}<br>%{customdata:.1f} MW<extra></extra>",
         customdata=buy_vals,
     ))
+
     fig_net.update_layout(
-        height=180, barmode="relative",
+        height=180,
+        barmode="relative",
         plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
         margin=dict(l=50, r=20, t=10, b=40),
-        legend=dict(font=dict(family="DM Sans", size=11),
-                    orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis=dict(gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=10),
-                   tickangle=-45, tickmode="array",
-                   tickvals=time_labels[::8], ticktext=time_labels[::8]),
-        yaxis=dict(title="Net demand", gridcolor="#f1f5f9",
-                   tickfont=dict(family="DM Sans", size=10), ticksuffix=" MW"),
+        legend=dict(
+            font=dict(family="DM Sans", size=11),
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+        ),
+        xaxis=dict(
+            gridcolor="#f1f5f9", tickfont=dict(family="DM Sans", size=10),
+            tickangle=-45,
+            tickmode="array",
+            tickvals=time_labels[::8],
+            ticktext=time_labels[::8],
+        ),
+        yaxis=dict(
+            title="Net demand",
+            gridcolor="#f1f5f9",
+            tickfont=dict(family="DM Sans", size=10),
+            ticksuffix=" MW",
+        ),
         hovermode="x unified",
     )
     st.plotly_chart(fig_net, use_container_width=True)
@@ -1402,35 +1589,26 @@ def main():
         initial_sidebar_state="expanded",
     )
 
-    # ── Global styles ─────────────────────────────────────────────────────
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700;800&display=swap');
     html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-    .main .block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1200px; }
+    .main .block-container { padding-top: 0rem; padding-bottom: 2rem; max-width: 1200px; }
     .stButton > button { font-family: 'DM Sans', sans-serif; font-weight: 600; border-radius: 8px; }
     .stButton > button[kind="primary"] { background: #1e40af; border: none; }
-    .logo-top-right {
-        position: fixed;
-        top: 0.45rem;
-        right: 4.5rem;
-        z-index: 9999;
-    }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Logo: base64-encoded so no static folder needed ───────────────────
-    st.markdown(
-        f'<div class="logo-top-right">{_logo_html(height=36)}</div>',
-        unsafe_allow_html=True,
-    )
+    
 
-    # ── Sidebar ───────────────────────────────────────────────────────────
+    # Display logo at the top of the main dashboard
+    st.image("50hertz_Logo (2).png", width=180)
+
     with st.sidebar:
         st.markdown("""
         <div style='padding:0.5rem 0 1.5rem 0'>
-            <div style='font-size:1.5rem;font-weight:800;color:#1e293b'>⚡ Welspun</div>
-            <div style='font-size:0.8rem;color:#94a3b8'>WLL / WCL Automation</div>
+            <div style='font-size:1.5rem;font-weight:800;color:#1e293b'>⚡ Plant Demand</div>
+            <div style='font-size:0.8rem;color:#94a3b8'>50Hertz · WLL / WCL Automation</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1441,12 +1619,7 @@ def main():
         )
 
         st.markdown("---")
-        st.markdown(
-            "<div style='font-size:0.75rem;color:#94a3b8;font-weight:600;"
-            "text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.5rem'>"
-            "Plant Status</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<div style='font-size:0.75rem;color:#94a3b8;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.5rem'>Plant Status</div>", unsafe_allow_html=True)
 
         for p in PLANTS:
             pid, display, _, _, group, _ = p
