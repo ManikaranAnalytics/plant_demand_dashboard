@@ -67,6 +67,7 @@ PLANTS = [
     # Generation plants  — have auxiliary column
     ("GEN_80MW",   "80MW Generation",    "80MW GENERATION",      "80MW AUXILIARY",   "Generation", "MW"),
     ("GEN_43MW",   "43MW Generation",    "43MW GENERATION",      "43MW AUXILIARY",   "Generation", "MW"),
+    ("GEN_12MW",   "12MW Generation",    "12MW GENERATION",      "12MW AUXILIARY",   "Generation", "MW"),
     ("GEN_Solar",  "Solar Generation",   "SOLAR NET GENERATION", "SOLAR AUXILIARY",  "Generation", "MW"),
     # Load plants — no auxiliary column
     ("WLL_WLL",    "WLL",                "WLL",                  None,               "WLL",        "MW"),
@@ -75,6 +76,7 @@ PLANTS = [
     ("WCL_STEEL",  "WCL Steel Division", "WCL STEEL DIVISION",   None,               "WCL",        "MW"),
     ("WCL_ATSPL",  "ATSPL",              "ATSPL",                None,               "WCL",        "MW"),
     ("WCL_WDIPL",  "WDIPL",              "WDIPL",                None,               "WCL",        "MW"),
+    ("WCL_WML",    "WML",                "WML",                  None,               "WCL",        "MW"),
     ("WCL_WASCO",  "WASCO",              "WASCO",                None,               "WCL",        "MW"),
 ]
 
@@ -102,7 +104,18 @@ def load_credentials() -> dict:
     # Local fallback
     if not CREDENTIALS_FILE.exists():
         CREDENTIALS_FILE.write_text(json.dumps(DEFAULT_CREDENTIALS, indent=2))
-    return json.loads(CREDENTIALS_FILE.read_text())
+        return DEFAULT_CREDENTIALS
+    
+    creds = json.loads(CREDENTIALS_FILE.read_text())
+    updated = False
+    for pid, default_hash in DEFAULT_CREDENTIALS.items():
+        if pid not in creds:
+            creds[pid] = default_hash
+            updated = True
+            
+    if updated:
+        CREDENTIALS_FILE.write_text(json.dumps(creds, indent=2))
+    return creds
 
 def verify_password(plant_id: str, password: str) -> bool:
     creds = load_credentials()
@@ -428,6 +441,7 @@ def generate_template(plant_id: str) -> bytes:
 COLORS = {
     "GEN_80MW":   "#F97316",
     "GEN_43MW":   "#EAB308",
+    "GEN_12MW":   "#D97706",
     "GEN_Solar":  "#22C55E",
     "WLL_WLL":    "#3B82F6",
     "WLL_WHSL":   "#6366F1",
@@ -435,6 +449,7 @@ COLORS = {
     "WCL_STEEL":  "#14B8A6",
     "WCL_ATSPL":  "#8B5CF6",
     "WCL_WDIPL":  "#F43F5E",
+    "WCL_WML":    "#F59E0B",
     "WCL_WASCO":  "#06B6D4",
     # Totals
     "TOTAL_GEN":  "#F97316",
@@ -576,11 +591,11 @@ def make_dashboard_overview(all_data: dict) -> go.Figure:
 def compute_totals(plants_with_data: dict, selected_date) -> dict:
     """
     Returns dict of {label: pd.Series indexed by Time Block 1-96}.
-    Total WCL  = PIPE + STEEL + ATSPL + WDIPL + WASCO
+    Total WCL  = PIPE + STEEL + ATSPL + WDIPL + WASCO + WML
     Total WLL  = WLL + WHSL
-    Total AUX  = 80MW AUX + 43MW AUX + Solar AUX (if any)
+    Total AUX  = 80MW AUX + 43MW AUX + 12MW AUX + Solar AUX (if any)
     Total Load = Total WLL + Total WCL + Total AUX
-    Total Gen  = 80MW GEN + 43MW GEN + Solar GEN
+    Total Gen  = 80MW GEN + 43MW GEN + 12MW GEN + Solar GEN
     """
     def get_series(plant_id, col="Value"):
         df = plants_with_data.get(plant_id)
@@ -615,6 +630,7 @@ def compute_totals(plants_with_data: dict, selected_date) -> dict:
     wcl = safe_add(
         get_series("WCL_PIPE"), get_series("WCL_STEEL"),
         get_series("WCL_ATSPL"), get_series("WCL_WDIPL"), get_series("WCL_WASCO"),
+        get_series("WCL_WML"),
     )
     # WLL group
     wll = safe_add(get_series("WLL_WLL"), get_series("WLL_WHSL"))
@@ -622,6 +638,7 @@ def compute_totals(plants_with_data: dict, selected_date) -> dict:
     aux = safe_add(
         get_series("GEN_80MW", "Auxiliary"),
         get_series("GEN_43MW", "Auxiliary"),
+        get_series("GEN_12MW", "Auxiliary"),
         get_series("GEN_Solar", "Auxiliary"),
     )
     # Total Load
@@ -632,7 +649,7 @@ def compute_totals(plants_with_data: dict, selected_date) -> dict:
     )
     # Total Generation
     total_gen = safe_add(
-        get_series("GEN_80MW"), get_series("GEN_43MW"), get_series("GEN_Solar"),
+        get_series("GEN_80MW"), get_series("GEN_43MW"), get_series("GEN_12MW"), get_series("GEN_Solar"),
     )
 
     return {
@@ -977,11 +994,11 @@ def page_dashboard():
     totals = compute_totals(plants_with_data, selected_date)
 
     TOTAL_META = {
-        "Total WCL":        ("WCL Load", "#EC4899",  "Pipe + Steel + ATSPL + WDIPL + WASCO"),
+        "Total WCL":        ("WCL Load", "#EC4899",  "Pipe + Steel + ATSPL + WDIPL + WASCO + WML"),
         "Total WLL":        ("WLL Load",  "#3B82F6",  "WLL + WHSL"),
-        "Total Auxiliary":  ("Auxiliary", "#8B5CF6",  "80MW Aux + 43MW Aux + Solar Aux"),
+        "Total Auxiliary":  ("Auxiliary", "#8B5CF6",  "80MW Aux + 43MW Aux + 12MW Aux + Solar Aux"),
         "Total Load":       ("Net Load",  "#1E293B",  "WCL + WLL + Auxiliary"),
-        "Total Generation": ("Generation","#F97316",  "80MW + 43MW + Solar"),
+        "Total Generation": ("Generation","#F97316",  "80MW + 43MW + 12MW + Solar"),
     }
 
     total_cols = st.columns(5)
@@ -1201,52 +1218,59 @@ def page_consolidated():
 
         gen_80   = v("GEN_80MW")
         gen_43   = v("GEN_43MW")
+        gen_12   = v("GEN_12MW")
         gen_sol  = v("GEN_Solar")
         aux_80   = v("GEN_80MW", "Auxiliary")
         aux_43   = v("GEN_43MW", "Auxiliary")
+        aux_12   = v("GEN_12MW", "Auxiliary")
         aux_sol  = v("GEN_Solar", "Auxiliary")
 
-        total_gen = sum(x for x in [gen_80, gen_43, gen_sol] if pd.notna(x)) or float("nan")
-        total_aux = sum(x for x in [aux_80, aux_43, aux_sol] if pd.notna(x)) or float("nan")
+        total_gen = sum(x for x in [gen_80, gen_43, gen_12, gen_sol] if pd.notna(x)) or float("nan")
+        total_aux = sum(x for x in [aux_80, aux_43, aux_12, aux_sol] if pd.notna(x)) or float("nan")
 
-        wll  = v("WLL_WLL")
-        whsl = v("WLL_WHSL")
-        pipe = v("WCL_PIPE")
-        stl  = v("WCL_STEEL")
-        atspl= v("WCL_ATSPL")
-        wdipl= v("WCL_WDIPL")
-        wasco= v("WCL_WASCO")
+        wll   = v("WLL_WLL")
+        whsl  = v("WLL_WHSL")
+        pipe  = v("WCL_PIPE")
+        stl   = v("WCL_STEEL")
+        atspl = v("WCL_ATSPL")
+        wdipl = v("WCL_WDIPL")
+        wasco = v("WCL_WASCO")
+        wcl_wml = v("WCL_WML")
 
-        # WML = WLL + WHSL (total WLL group)
-        wml_vals = [x for x in [wll, whsl] if pd.notna(x)]
-        wml = sum(wml_vals) if wml_vals else float("nan")
+        # Total WLL = WLL + WHSL
+        wll_vals = [x for x in [wll, whsl] if pd.notna(x)]
+        total_wll = sum(wll_vals) if wll_vals else float("nan")
 
-        # Total WCL = pipe + steel + atspl + wdipl + wasco
-        wcl_vals = [x for x in [pipe, stl, atspl, wdipl, wasco] if pd.notna(x)]
+        # Total WCL = pipe + steel + atspl + wdipl + wasco + WML plant
+        wcl_vals = [x for x in [pipe, stl, atspl, wdipl, wasco, wcl_wml] if pd.notna(x)]
         total_wcl = sum(wcl_vals) if wcl_vals else float("nan")
 
-        # Total Demand = Total WCL + Total WLL (WML) + Total Auxiliary
-        demand_vals = [x for x in [total_wcl, wml, total_aux] if pd.notna(x)]
+        # Total Demand = Total WCL + Total WLL + Total Auxiliary
+        demand_vals = [x for x in [total_wcl, total_wll, total_aux] if pd.notna(x)]
         total_demand = sum(demand_vals) if demand_vals else float("nan")
 
         rows.append({
             "Time Interval":        TIME_STAMPS[tb - 1],
             "80MW GENERATION":      gen_80,
             "43MW GENERATION":      gen_43,
+            "12MW GENERATION":      gen_12,
             "SOLAR NET GENERATION": gen_sol,
             "TOTAL TG GENERATION":  round(total_gen, 3) if pd.notna(total_gen) else float("nan"),
             "80MW AUXILIARY":       aux_80,
             "43MW AUXILIARY":       aux_43,
+            "12MW AUXILIARY":       aux_12,
             "SOLAR AUXILIARY":      aux_sol,
             "TOTAL AUXILIARY":      round(total_aux, 3) if pd.notna(total_aux) else float("nan"),
             "WLL":                  wll,
             "WHSL":                 whsl,
+            "TOTAL WLL":            round(total_wll, 3) if pd.notna(total_wll) else float("nan"),
             "WCL PIPE DIVISION":    pipe,
             "WCL STEEL DIVISION":   stl,
             "ATSPL":                atspl,
             "WDIPL":                wdipl,
             "WASCO":                wasco,
-            "WML":                  round(wml, 3) if pd.notna(wml) else float("nan"),
+            "WML":                  wcl_wml,
+            "TOTAL WCL":            round(total_wcl, 3) if pd.notna(total_wcl) else float("nan"),
             "TOTAL DEMAND":         round(total_demand, 3) if pd.notna(total_demand) else float("nan"),
         })
 
