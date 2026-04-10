@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-CONTACTS_FILE = BASE_DIR / "plant_data" / "contacts.json"
+CONTACTS_FILE = BASE_DIR / "scripts" / "contacts.json"
 
 def get_smtp_config():
     return {

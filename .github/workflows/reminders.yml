@@ -2,8 +2,8 @@ name: Plant Demand Reminders
 
 on:
   schedule:
-    # Test cron: 11:05 AM UTC is 4:35 PM IST
-    - cron: '05 11 * * *'
+    # Test cron: 11:15 AM UTC is 4:45 PM IST
+    - cron: '15 11 * * *'
     # 3:00 PM IST (UTC+5:30) is 9:30 AM UTC
     - cron: '30 9 * * *'
     # 5:00 PM IST (UTC+5:30) is 11:30 AM UTC
@@ -29,14 +29,6 @@ jobs:
           echo "$CONFIG_ENV" > .env
         env:
           CONFIG_ENV: ${{ secrets.CONFIG_ENV }}
-
-      - name: Create contacts.json from secret
-        shell: bash
-        run: |
-          mkdir -p plant_data
-          echo "$CONTACTS_JSON" > plant_data/contacts.json
-        env:
-          CONTACTS_JSON: ${{ secrets.CONTACTS_JSON }}
 
       - name: Install dependencies
         run: |
