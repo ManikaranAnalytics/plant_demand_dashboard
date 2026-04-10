@@ -11,15 +11,6 @@ on:
 jobs:
   reminders:
     runs-on: ubuntu-latest
-    env:
-      SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-      SMTP_PORT: ${{ secrets.SMTP_PORT }}
-      SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-      EMAIL_SUBJECT_PREFIX: ${{ secrets.EMAIL_SUBJECT_PREFIX }}
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
 
     steps:
       - name: Checkout repository
@@ -29,6 +20,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
+      - name: Create .env file from secret
+        shell: bash
+        run: |
+          echo "$CONFIG_ENV" > .env
+        env:
+          CONFIG_ENV: ${{ secrets.CONFIG_ENV }}
 
       - name: Install dependencies
         run: |
