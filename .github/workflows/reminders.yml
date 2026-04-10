@@ -30,6 +30,14 @@ jobs:
         env:
           CONFIG_ENV: ${{ secrets.CONFIG_ENV }}
 
+      - name: Create contacts.json from secret
+        shell: bash
+        run: |
+          mkdir -p plant_data
+          echo "$CONTACTS_JSON" > plant_data/contacts.json
+        env:
+          CONTACTS_JSON: ${{ secrets.CONTACTS_JSON }}
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
