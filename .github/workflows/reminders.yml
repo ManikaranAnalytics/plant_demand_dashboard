@@ -2,8 +2,8 @@ name: Plant Demand Reminders
 
 on:
   schedule:
-    # Test cron: 10:45 AM UTC is 4:15 PM IST
-    - cron: '45 10 * * *'
+    # Test cron: 11:05 AM UTC is 4:35 PM IST
+    - cron: '05 11 * * *'
     # 3:00 PM IST (UTC+5:30) is 9:30 AM UTC
     - cron: '30 9 * * *'
     # 5:00 PM IST (UTC+5:30) is 11:30 AM UTC
