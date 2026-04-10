@@ -1,0 +1,44 @@
+name: Plant Demand Reminders
+
+on:
+  schedule:
+    # 3:00 PM IST (UTC+5:30) is 9:30 AM UTC
+    - cron: '30 9 * * *'
+    # 5:00 PM IST (UTC+5:30) is 11:30 AM UTC
+    - cron: '30 11 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  reminders:
+    runs-on: ubuntu-latest
+    env:
+      SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+      EMAIL_SUBJECT_PREFIX: ${{ secrets.EMAIL_SUBJECT_PREFIX }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Normal Reminder (3 PM IST)
+        if: github.event.schedule == '30 9 * * *' || github.event_name == 'workflow_dispatch'
+        run: python scripts/send_daily_reminders.py
+
+      - name: Run Missing Data Reminder (5 PM IST)
+        if: github.event.schedule == '30 11 * * *' || github.event_name == 'workflow_dispatch'
+        run: python scripts/send_missing_reminders.py
