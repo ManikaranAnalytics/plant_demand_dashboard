@@ -1,4 +1,3 @@
-import pandas as pd
 from datetime import date, timedelta
 from pathlib import Path
 from email_utils import load_contacts, send_email, get_smtp_config
@@ -19,25 +18,9 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "plant_data"
 
-def check_submission_locally(plant_id, target_date):
-    csv_path = DATA_DIR / f"{plant_id}.csv"
-    if not csv_path.exists():
-        return False
-    
-    try:
-        df = pd.read_csv(csv_path)
-        if "Date" not in df.columns:
-            return False
-            
-        df["Date"] = pd.to_datetime(df["Date"]).dt.date
-        target_rows = df[df["Date"] == target_date]
-        return not target_rows.empty
-    except Exception as e:
-        print(f"Error checking local CSV for {plant_id}: {e}")
-        return False
-
 def check_submission_supabase(plant_id, target_date):
     if not supabase:
+        print(f"Supabase not configured. Cannot check submission for {plant_id}")
         return False
     
     try:
@@ -61,15 +44,15 @@ def main():
     target_date = date.today() + timedelta(days=2)
     print(f"Target date for reminder check: {target_date.strftime('%d-%m-%Y')} (D+2)")
     
+    if not supabase:
+        print("ERROR: Supabase is not configured. Cannot verify submissions.")
+        return
+
     missing_plants = []
     
     for plant_id in contacts.keys():
-        # Check both methods if possible
-        submitted = check_submission_locally(plant_id, target_date)
-        if not submitted and supabase:
-            submitted = check_submission_supabase(plant_id, target_date)
-            
-        if not submitted:
+        # Check only Supabase
+        if not check_submission_supabase(plant_id, target_date):
             missing_plants.append(plant_id)
 
     if not missing_plants:
