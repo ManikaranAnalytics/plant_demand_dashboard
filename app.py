@@ -128,6 +128,37 @@ def verify_password(plant_id: str, password: str) -> bool:
 def data_file(plant_id: str) -> Path:
     return DATA_DIR / f"{plant_id}.csv"
 
+UPDATE_TRACKER = DATA_DIR / "last_updates.json"
+
+def record_update(plant_id: str) -> None:
+    import json
+    from datetime import datetime
+    data = {}
+    if UPDATE_TRACKER.exists():
+        try:
+            with open(UPDATE_TRACKER, "r") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+    data[plant_id] = datetime.now().strftime("%d %b %Y, %H:%M:%S")
+    try:
+        with open(UPDATE_TRACKER, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Warning: Failed to write update tracker: {e}")
+
+def get_last_update(plant_id: str) -> str:
+    import json
+    if UPDATE_TRACKER.exists():
+        try:
+            with open(UPDATE_TRACKER, "r") as f:
+                data = json.load(f)
+            return data.get(plant_id, "N/A")
+        except Exception:
+            pass
+    return "N/A"
+
+
 def save_data(plant_id: str, df: pd.DataFrame) -> None:
     """Save plant data rows. Supabase upsert on (plant_id, date, time_block); CSV fallback."""
     df = df.copy()
@@ -152,6 +183,7 @@ def save_data(plant_id: str, df: pd.DataFrame) -> None:
                     records[i:i+500],
                     on_conflict="plant_id,date,time_block"
                 ).execute()
+            record_update(plant_id)
             return
         except Exception as e:
             st.warning(f"Supabase save failed, falling back to local: {e}")
@@ -167,6 +199,8 @@ def save_data(plant_id: str, df: pd.DataFrame) -> None:
         combined = df
     combined.sort_values(["Date", "Time Block"], inplace=True)
     combined.to_csv(path, index=False)
+    record_update(plant_id)
+
 
 
 def load_data(plant_id: str) -> Optional[pd.DataFrame]:
@@ -647,7 +681,7 @@ def compute_totals(plants_with_data: dict, selected_date) -> dict:
         wll if wll is not None else None,
         aux if aux is not None else None,
     )
-    # Total Generation
+    # Total Projected Generation
     total_gen = safe_add(
         get_series("GEN_80MW"), get_series("GEN_43MW"), get_series("GEN_12MW"), get_series("GEN_Solar"),
     )
@@ -657,7 +691,7 @@ def compute_totals(plants_with_data: dict, selected_date) -> dict:
         "Total WLL":        wll,
         "Total Auxiliary":  aux,
         "Total Load":       total_load,
-        "Total Generation": total_gen,
+        "Total Projected Generation": total_gen,
     }
 
 def avg_or_none(s) -> Optional[float]:
@@ -727,17 +761,18 @@ def page_input():
                         font-size:0.85rem;color:#166534'>
                 📋 <strong>{sel_disp}</strong> template — columns: Date | Time Interval |
                 <strong>{sel_col}</strong>{aux_note}<br>
-                Pre-filled for <strong>D+2: {d2.strftime('%d %B %Y')}</strong> · 96 rows
+                Pre-filled for <strong>D+2: {d2.strftime('%d %B %Y')}</strong> - 96 rows
             </div>
             """, unsafe_allow_html=True)
+
             tmpl_bytes = generate_template(selected)
             st.download_button(
-                label=f"⬇️ Download Template — {sel_disp}",
+                label=f"⬇️  Download Template — {sel_disp}",
                 data=tmpl_bytes,
                 file_name=f"template_{selected}_{d2.strftime('%d-%m-%Y')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="prelogin_tmpl",
-                use_container_width=False,
+                width='content',
             )
         return
 
@@ -759,7 +794,7 @@ def page_input():
         </div>
         """, unsafe_allow_html=True)
     with col_logout:
-        if st.button("Logout", use_container_width=True):
+        if st.button("Logout", width='stretch'):
             st.session_state.logged_in_plant = None
             st.rerun()
 
@@ -773,7 +808,7 @@ def page_input():
                 font-size:0.85rem;color:#166534'>
         📋 Template columns: <strong>Date</strong> | <strong>Time Interval</strong> | 
         <strong>{col_header}</strong>{aux_note}<br>
-        Date pre-filled as <strong>D+2: {d2_str}</strong> · 96 rows (00:00–24:00)
+        Date pre-filled as <strong>D+2: {d2_str}</strong> - 96 rows (00:00–24:00)
     </div>
     """, unsafe_allow_html=True)
 
@@ -784,7 +819,7 @@ def page_input():
             data=tmpl_bytes,
             file_name=f"template_{plant_id}_{d2_str}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=False,
+            width='content',
         )
     else:
         st.warning("openpyxl not installed — template download unavailable.")
@@ -822,7 +857,7 @@ def page_input():
             if "Auxiliary" in last.columns and last["Auxiliary"].notna().any():
                 show[aux_col] = last["Auxiliary"].values
                 cols_show.append(aux_col)
-            st.dataframe(show[cols_show], use_container_width=True, hide_index=True)
+            st.dataframe(show[cols_show], width='stretch', hide_index=True)
     else:
         st.info("No previous data found. Download the template, fill in your values, and upload below.")
 
@@ -862,13 +897,13 @@ def page_input():
                 show_cols.append(aux_col)
 
             with st.expander("Preview parsed data", expanded=True):
-                st.dataframe(preview[show_cols].head(20), use_container_width=True, hide_index=True)
+                st.dataframe(preview[show_cols].head(20), width='stretch', hide_index=True)
                 if len(preview) > 20:
                     st.caption(f"... and {len(preview) - 20} more rows")
 
             col_a, col_b = st.columns([1, 3])
             with col_a:
-                if st.button("✅ Confirm & Save", type="primary", use_container_width=True):
+                if st.button("✅ Confirm & Save", type="primary", width='stretch'):
                     save_data(plant_id, df_parsed)
                     st.success("Data saved successfully!")
                     st.balloons()
@@ -877,7 +912,7 @@ def page_input():
     if last is not None and len(last) > 0:
         st.markdown("#### 📈 Your Latest Data")
         fig = make_line_chart(last, plant_id, f"{display} — Last Submission")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: TEMPLATE DOWNLOAD (ALL PLANTS)
@@ -926,7 +961,7 @@ def page_templates():
                         file_name=f"template_{pid}_{d2_str}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"tmpl_{pid}",
-                        use_container_width=True,
+                        width='stretch',
                     )
                 else:
                     st.warning("openpyxl needed")
@@ -963,82 +998,36 @@ def page_dashboard():
     selected_date = pd.to_datetime(selected_date_str, format="%d %B %Y")
 
     # ─────────────────────────────────────────────────────────────────────
-    # SECTION 1 — INDIVIDUAL SUMMARY CARDS
+    # SECTION 1 — TOTALS CHARTS (SPLIT)
     # ─────────────────────────────────────────────────────────────────────
-    st.markdown("#### Summary — Individual Plants")
-    card_cols = st.columns(5)
-    for i, (plant_id, df) in enumerate(plants_with_data.items()):
-        _, display, _, _, group, unit = PLANT_BY_ID[plant_id]
-        sub = df[df["Date"] == selected_date]
-        if sub.empty:
-            sub = df[df["Date"] == df["Date"].max()]
-        avg = sub["Value"].mean()
-        color = COLORS.get(plant_id, "#3B82F6")
-        with card_cols[i % 5]:
-            st.markdown(f"""
-            <div style='background:white;border:1px solid #e2e8f0;border-top:3px solid {color};
-                        border-radius:10px;padding:0.9rem;margin-bottom:0.8rem;font-family:DM Sans,sans-serif'>
-                <div style='font-size:0.72rem;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em'>{group}</div>
-                <div style='font-size:0.95rem;font-weight:700;color:#1e293b;margin:0.2rem 0'>{display}</div>
-                <div style='font-size:1.3rem;font-weight:800;color:{color}'>{avg:.1f}</div>
-                <div style='font-size:0.75rem;color:#94a3b8'>{unit} avg</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    # ─────────────────────────────────────────────────────────────────────
-    # SECTION 2 — TOTALS CARDS
-    # ─────────────────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("#### 📊 Totals Overview")
-
     totals = compute_totals(plants_with_data, selected_date)
 
-    TOTAL_META = {
-        "Total WCL":        ("WCL Load", "#EC4899",  "Pipe + Steel + ATSPL + WDIPL + WASCO + WML"),
-        "Total WLL":        ("WLL Load",  "#3B82F6",  "WLL + WHSL"),
-        "Total Auxiliary":  ("Auxiliary", "#8B5CF6",  "80MW Aux + 43MW Aux + 12MW Aux + Solar Aux"),
-        "Total Load":       ("Net Load",  "#1E293B",  "WCL + WLL + Auxiliary"),
-        "Total Generation": ("Generation","#F97316",  "80MW + 43MW + 12MW + Solar"),
-    }
-
-    total_cols = st.columns(5)
-    for i, (key, (label, color, tooltip)) in enumerate(TOTAL_META.items()):
-        s = totals.get(key)
-        avg = avg_or_none(s)
-        val_str = f"{avg:.1f}" if avg is not None else "—"
-        with total_cols[i]:
-            st.markdown(f"""
-            <div style='background:white;border:2px solid {color};border-radius:10px;
-                        padding:0.9rem;margin-bottom:0.8rem;font-family:DM Sans,sans-serif;
-                        box-shadow:0 2px 8px rgba(0,0,0,0.06)'>
-                <div style='font-size:0.72rem;color:#94a3b8;text-transform:uppercase;
-                             letter-spacing:0.05em'>{label}</div>
-                <div style='font-size:0.9rem;font-weight:700;color:#1e293b;margin:0.2rem 0'>{key}</div>
-                <div style='font-size:1.5rem;font-weight:800;color:{color}'>{val_str}</div>
-                <div style='font-size:0.7rem;color:#94a3b8;margin-top:2px'>{tooltip}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    # ── Totals Chart ───────────────────────────────────────────────────────
     total_color_map = {
         "Total WCL":        "#EC4899",
         "Total WLL":        "#3B82F6",
         "Total Auxiliary":  "#8B5CF6",
         "Total Load":       "#1E293B",
-        "Total Generation": "#F97316",
+        "Total Projected Generation": "#F97316",
     }
-    valid_totals = {k: v for k, v in totals.items() if v is not None}
-    if valid_totals:
-        fig_totals = make_total_chart(valid_totals, "Totals — All Groups", total_color_map)
-        st.plotly_chart(fig_totals, use_container_width=True)
 
-    # ─────────────────────────────────────────────────────────────────────
-    # SECTION 3 — ALL PLANTS OVERVIEW CHART
-    # ─────────────────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("#### All Plants Overview")
-    fig_overview = make_dashboard_overview(plants_with_data)
-    st.plotly_chart(fig_overview, use_container_width=True)
+    st.markdown("#### ⚡ Power Generation Summary")
+    gen_totals = {k: v for k, v in totals.items() if k == "Total Projected Generation" and v is not None}
+    if gen_totals:
+        fig_gen = make_total_chart(gen_totals, "Generation Profile — All Sources", total_color_map)
+        st.plotly_chart(fig_gen, width='stretch')
+    else:
+        st.info("No generation data available for this date.")
+
+    st.markdown("---")
+    st.markdown("#### 📊 Load Summary & Breakdown")
+    load_keys = ["Total WCL", "Total WLL", "Total Auxiliary", "Total Load"]
+    load_totals = {k: v for k, v in totals.items() if k in load_keys and v is not None}
+    if load_totals:
+        fig_load = make_total_chart(load_totals, "Load Distribution (WCL + WLL + Aux)", total_color_map)
+        st.plotly_chart(fig_load, width='stretch')
+    else:
+        st.info("No load data available for this date.")
 
     # ─────────────────────────────────────────────────────────────────────
     # SECTION 4 — DETAILED PLANT CHARTS
@@ -1088,7 +1077,7 @@ def page_dashboard():
                                 ⚠️ Showing latest data from <b>{pd.to_datetime(display_date).strftime('%d %b %Y')}</b>
                             </div>""", unsafe_allow_html=True)
                         fig = make_line_chart(date_df, plant_id, display)
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width='stretch')
 
     # ─────────────────────────────────────────────────────────────────────
     # SECTION 5 — STATISTICS TABLE
@@ -1104,17 +1093,19 @@ def page_dashboard():
             row = {
                 "Plant": display, "Group": group,
                 "Date":  pd.to_datetime(d).strftime("%d %b %Y"),
+                "Last Uploaded At": get_last_update(plant_id),
                 "Rows":  len(sub),
                 f"Avg ({unit})": round(sub["Value"].mean(), 2),
                 f"Max ({unit})": round(sub["Value"].max(), 2),
                 f"Min ({unit})": round(sub["Value"].min(), 2),
             }
             if "Auxiliary" in sub.columns and sub["Auxiliary"].notna().any():
+
                 row["Avg Aux (MW)"] = round(sub["Auxiliary"].mean(), 2)
             rows.append(row)
 
     if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
     # ─────────────────────────────────────────────────────────────────────
     # SECTION 6 — COMPARISON CHART
@@ -1155,7 +1146,7 @@ def page_dashboard():
             legend=dict(font=dict(family="DM Sans", size=11)),
             margin=dict(l=50, r=20, t=60, b=70), height=400,
         )
-        st.plotly_chart(fig_compare, use_container_width=True)
+        st.plotly_chart(fig_compare, width='stretch')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1245,9 +1236,15 @@ def page_consolidated():
         wcl_vals = [x for x in [pipe, stl, atspl, wdipl, wasco, wcl_wml] if pd.notna(x)]
         total_wcl = sum(wcl_vals) if wcl_vals else float("nan")
 
-        # Total Demand = Total WCL + Total WLL + Total Auxiliary
+        # Total Projected Demand = Total WCL + Total WLL + Total Auxiliary
         demand_vals = [x for x in [total_wcl, total_wll, total_aux] if pd.notna(x)]
         total_demand = sum(demand_vals) if demand_vals else float("nan")
+
+        # Net Demand = Total Projected Demand - Total Projected Generation
+        if pd.notna(total_gen) and pd.notna(total_demand):
+            net_demand = round(total_demand - total_gen, 3)
+        else:
+            net_demand = float("nan")
 
         rows.append({
             "Time Interval":        TIME_STAMPS[tb - 1],
@@ -1255,7 +1252,7 @@ def page_consolidated():
             "43MW GENERATION":      gen_43,
             "12MW GENERATION":      gen_12,
             "SOLAR NET GENERATION": gen_sol,
-            "TOTAL TG GENERATION":  round(total_gen, 3) if pd.notna(total_gen) else float("nan"),
+            "TOTAL PROJECTED GENERATION":  round(total_gen, 3) if pd.notna(total_gen) else float("nan"),
             "80MW AUXILIARY":       aux_80,
             "43MW AUXILIARY":       aux_43,
             "12MW AUXILIARY":       aux_12,
@@ -1271,7 +1268,8 @@ def page_consolidated():
             "WASCO":                wasco,
             "WML":                  wcl_wml,
             "TOTAL WCL":            round(total_wcl, 3) if pd.notna(total_wcl) else float("nan"),
-            "TOTAL DEMAND":         round(total_demand, 3) if pd.notna(total_demand) else float("nan"),
+            "TOTAL PROJECTED DEMAND":         round(total_demand, 3) if pd.notna(total_demand) else float("nan"),
+            "NET DEMAND":           net_demand,
         })
 
     cons_df = pd.DataFrame(rows)
@@ -1282,7 +1280,8 @@ def page_consolidated():
         _, disp, _, _, _, _ = PLANT_BY_ID[pid]
         if selected_date not in df["Date"].values:
             fb_date = pd.to_datetime(df["Date"].max()).strftime("%d %b %Y")
-            fallback_notes.append(f"<b>{disp}</b>: using {fb_date}")
+            upd_at = get_last_update(pid)
+            fallback_notes.append(f"<b>{disp}</b>: using {fb_date} (Uploaded: {upd_at})")
 
     if fallback_notes:
         st.markdown(f"""
@@ -1297,9 +1296,9 @@ def page_consolidated():
     summary = cons_df[numeric_cols].mean().round(2)
     scols = st.columns(3)
     highlights = [
-        ("TOTAL AUXILIARY",    "#8B5CF6"),
-        ("TOTAL TG GENERATION","#F97316"),
-        ("TOTAL DEMAND",       "#1E293B"),
+        ("TOTAL PROJECTED GENERATION", "#F97316"),
+        ("TOTAL PROJECTED DEMAND",        "#1E293B"),
+        ("NET DEMAND",          "#10B981"),
     ]
     for i, (col, color) in enumerate(highlights):
         val = summary.get(col, float("nan"))
@@ -1320,7 +1319,7 @@ def page_consolidated():
     st.markdown(f"##### All 96 Time Blocks — {selected_date_str}")
     st.dataframe(
         cons_df,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         height=500,
         column_config={c: st.column_config.NumberColumn(format="%.3f") for c in numeric_cols},
@@ -1359,9 +1358,10 @@ def page_consolidated():
     st.markdown("---")
     st.markdown("##### Totals Chart")
     chart_cols = {
-        "TOTAL TG GENERATION": "#F97316",
+        "TOTAL PROJECTED GENERATION": "#F97316",
         "TOTAL AUXILIARY":     "#8B5CF6",
-        "TOTAL DEMAND":        "#1E293B",
+        "TOTAL PROJECTED DEMAND":        "#1E293B",
+        "NET DEMAND":          "#10B981",
     }
     fig = go.Figure()
     for col, color in chart_cols.items():
@@ -1383,7 +1383,7 @@ def page_consolidated():
         legend=dict(font=dict(family="DM Sans", size=11)),
         margin=dict(l=50, r=20, t=40, b=70), height=380,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1464,7 +1464,7 @@ def page_live():
     st.markdown(
         "<div style='font-size:0.82rem;color:#64748b;margin-bottom:0.8rem'>"
         "Manikaran facilitates buy/sell of net demand in open power exchange market on behalf of Welspun. "
-        "Green bars = surplus (sell to market) · Red bars = deficit (buy from market).</div>",
+        "Green bars = surplus (sell to market) - Red bars = deficit (buy from market).</div>",
         unsafe_allow_html=True,
     )
 
@@ -1556,7 +1556,7 @@ def page_live():
         ),
         hovermode="x unified",
     )
-    st.plotly_chart(fig_mkt, use_container_width=True)
+    st.plotly_chart(fig_mkt, width='stretch')
 
     # ── Bottom chart: Net demand bar chart (buy = red down, sell = green up) ─
     fig_net = go.Figure()
@@ -1599,7 +1599,8 @@ def page_live():
         ),
         hovermode="x unified",
     )
-    st.plotly_chart(fig_net, use_container_width=True)
+    st.plotly_chart(fig_net, width='stretch')
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1633,7 +1634,7 @@ def main():
         st.markdown("""
         <div style='padding:0.5rem 0 1.5rem 0'>
             <div style='font-size:1.5rem;font-weight:800;color:#1e293b'> Welspun </div>
-            <div style='font-size:0.8rem;color:#94a3b8'>50Hertz · WLL / WCL Automation</div>
+            <div style='font-size:0.8rem;color:#94a3b8'>50Hertz - WLL / WCL Automation</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1674,7 +1675,7 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-        if st.button("🔄 Refresh", use_container_width=True):
+        if st.button("🔄 Refresh", width='stretch'):
             st.rerun()
 
     if "Input" in page:
