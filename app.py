@@ -207,15 +207,25 @@ def load_data(plant_id: str) -> Optional[pd.DataFrame]:
     """Load all data for a plant. Supabase first, CSV fallback."""
     if SUPABASE_OK:
         try:
-            rows = _supa.table("plant_readings") \
-                        .select("date, time_block, value, auxiliary, unit") \
-                        .eq("plant_id", plant_id) \
-                        .order("date") \
-                        .order("time_block") \
-                        .execute()
-            if not rows.data:
+            all_rows = []
+            page_size = 1000
+            offset = 0
+            while True:
+                batch = _supa.table("plant_readings") \
+                             .select("date, time_block, value, auxiliary, unit") \
+                             .eq("plant_id", plant_id) \
+                             .order("date") \
+                             .order("time_block") \
+                             .range(offset, offset + page_size - 1) \
+                             .execute()
+                all_rows.extend(batch.data)
+                if len(batch.data) < page_size:
+                    break
+                offset += page_size
+
+            if not all_rows:
                 return None
-            df = pd.DataFrame(rows.data)
+            df = pd.DataFrame(all_rows)
             df.rename(columns={"date": "Date", "time_block": "Time Block",
                                 "value": "Value", "auxiliary": "Auxiliary",
                                 "unit": "Unit"}, inplace=True)
